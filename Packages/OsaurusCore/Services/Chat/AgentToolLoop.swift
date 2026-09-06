@@ -316,13 +316,21 @@ enum AgentLoopModelStep {
         // The same announcement as the closing SENTENCE of a status line:
         // "The Wellkr site blocks retrieval. Let me try the Verywell Health
         // article and the Quantum Cacao source." ended an Ornith research run
-        // with `stop` and no call. Narrower than the line rule: only
-        // first-person action phrases (try/fetch/check/read/search/run/open/
-        // look), never "let me know", so a sign-off is not mistaken for a
-        // promised call.
+        // with `stop` and no call. A verb allowlist (try/fetch/check/read/…)
+        // then missed the next three endings of the same model on the folder-
+        // attached run (2026-09-06, session 58544EC9): "I have solid sources
+        // now. Let me get one more with scientific detail…", "I have enough
+        // sources. Let me write the research report to the host files
+        // folder.", "No, I haven't written the file yet. Let me do that now."
+        // — each accepted as a final answer while file_write was available.
+        // The closing sentence is therefore judged by its OPENER (a first-
+        // person "about to act" phrase) with an explicit sign-off exclusion
+        // list ("let me know…", "I'll be here…", "I will wait…"), so a promise
+        // of work is recovered whatever the verb, and a sign-off stays final.
         guard let sentence = Self.closingSentence(of: last), sentence.count <= 120 else { return false }
         let loweredSentence = sentence.lowercased()
-        return Self.actionAnnouncementPrefixes.contains { loweredSentence.hasPrefix($0) }
+        guard Self.closingActionOpeners.contains(where: { loweredSentence.hasPrefix($0) }) else { return false }
+        return !Self.closingSignOffPrefixes.contains(where: { loweredSentence.hasPrefix($0) })
     }
 
     /// The last sentence of a line: the text after the final ". ", "! " or
@@ -340,16 +348,21 @@ enum AgentLoopModelStep {
         return tail.isEmpty ? nil : tail
     }
 
-    /// First-person "about to act on a source" openers for the closing-sentence
-    /// rule. Lowercased, matched as prefixes of the final sentence only.
-    private static let actionAnnouncementPrefixes: [String] = [
-        "let me try ", "let me fetch ", "let me check ", "let me read ", "let me search ",
-        "let me run ", "let me open ", "let me look ", "let me pull ", "let me grab ",
-        "now let me ", "next, let me ", "next let me ",
-        "i'll try ", "i'll fetch ", "i'll check ", "i'll read ", "i'll search ",
-        "i'll run ", "i'll open ", "i'll look ", "i'll pull ", "i'll grab ",
-        "i will try ", "i will fetch ", "i will check ", "i will read ", "i will search ",
-        "next, i'll ", "next i'll ",
+    /// First-person "about to act" openers for the closing-sentence rule.
+    /// Lowercased, matched as prefixes of the final sentence only.
+    private static let closingActionOpeners: [String] = [
+        "let me ", "now let me ", "next, let me ", "next let me ", "first, let me ", "first let me ",
+        "i'll ", "i will ", "i'm going to ", "i am going to ", "next, i'll ", "next i'll ",
+    ]
+
+    /// Closing sentences that open like an announcement but are sign-offs or
+    /// requests to the user, never a promised call: they stay final.
+    private static let closingSignOffPrefixes: [String] = [
+        "let me know", "let me be ", "let me explain", "let me clarify", "let me summarize", "let me summarise",
+        "i'll be ", "i will be ", "i'll let you know", "i will let you know", "i'll wait", "i will wait",
+        "i'll stand by", "i will stand by", "i'll leave ", "i will leave ", "i'll stop ", "i will stop ",
+        "i'll hold ", "i will hold ", "i'll need ", "i will need ", "i'll have to ", "i will have to ",
+        "i'll refrain", "i will refrain", "i'll defer", "i will defer",
     ]
 
     /// Openers of a first-person "about to act" line. Lowercased, matched as
@@ -590,6 +603,13 @@ struct AgentLoopHooks {
     /// listing the authorized names in the `tool_not_found` notice. Nil on
     /// surfaces that publish no scope — both behaviours then stay off.
     var authorizedToolNames: (() -> Set<String>)?
+
+    /// What the announce-only nudge may say about tools the model cannot
+    /// call right now (see `AnnouncedToolCallRecovery`). Chat binds it to the
+    /// registry's classification of every registered tool against the live
+    /// scope; nil keeps the bare nudge. Assigned after construction like
+    /// `authorizedToolNames`.
+    var announcedToolCallRecovery: (() -> AgentToolLoop.AnnouncedToolCallRecovery?)?
 
     init(
         isCancelled: @escaping () async -> Bool = { false },
@@ -1224,6 +1244,59 @@ enum AgentToolLoop {
         "[System Notice] Your previous turn described a tool call but did not actually emit one, so nothing ran. "
         + "No file was written and no command executed. Emit the tool call itself now, as a real call — "
         + "do not describe it, narrate it, or claim it already ran."
+
+    /// What the announce-only nudge may truthfully say about tools the model
+    /// cannot call right now. Three buckets, because they call for three
+    /// different next steps and the wrong one either wastes a retry (asking
+    /// the model to emit a call it has no schema for) or lies (telling it a
+    /// legitimately loadable tool is impossible):
+    /// - `exposed`: callable now, as-is.
+    /// - `loadable`: registered, and `loaderName` would actually grant it
+    ///   (same gate as the registry's `tool_not_found` hint).
+    /// - `workspaceBlocked`: the file/shell tools that need a workspace
+    ///   attached to THIS chat; no loader helps, only the user can.
+    struct AnnouncedToolCallRecovery: Equatable, Sendable {
+        var exposed: Set<String> = []
+        var loadable: Set<String> = []
+        var loaderName: String = "capabilities"
+        var workspaceBlocked: Set<String> = []
+
+        var isEmpty: Bool { exposed.isEmpty && loadable.isEmpty && workspaceBlocked.isEmpty }
+    }
+
+    /// The announce-only nudge, naming what the model can do about the tool
+    /// it described. Ornith research run (2026-09-06, current main): the Web
+    /// Researcher agent had no file tool in its schema (no folder attached to
+    /// the chat), so "Let me write the markdown file to the host files
+    /// folder" could never become a call — the bare nudge told the model to
+    /// "emit the tool call itself now" for a tool it did not have, twice, and
+    /// the run ended on the same announcement. The classified notice tells it
+    /// which described actions are callable, which are one load away, and
+    /// which need the user to attach a folder; only the last is "impossible
+    /// in this chat".
+    static func announcedToolCallNotice(recovery: AnnouncedToolCallRecovery?) -> String {
+        guard let recovery, !recovery.isEmpty else { return announcedToolCallNotice }
+        var text = announcedToolCallNotice
+        if !recovery.exposed.isEmpty {
+            text += " The tools you can call right now in this chat are: "
+                + recovery.exposed.sorted().joined(separator: ", ") + "."
+        }
+        if !recovery.loadable.isEmpty {
+            text += " These tools exist but are not loaded yet; call \(recovery.loaderName) with ids "
+                + "[\"tool/<name>\"] first, then emit the call: "
+                + recovery.loadable.sorted().joined(separator: ", ") + "."
+        }
+        if !recovery.workspaceBlocked.isEmpty {
+            text += " " + recovery.workspaceBlocked.sorted().joined(separator: ", ")
+                + " need a workspace attached to THIS chat and there is none, so no call can write, read or run "
+                + "files here; do not announce that again. Tell the user to attach a folder via the Folder chip "
+                + "(or enable Autonomous execution) and give them the content directly in your answer"
+                + (recovery.exposed.contains("share_artifact") ? " (share_artifact can carry it)." : ".")
+        }
+        text += " If what you described needs a tool in none of these groups, say plainly that you cannot do it "
+            + "in this chat and give the user the result you have."
+        return text
+    }
 
     /// How many times a run will push back on "shall I continue?" before
     /// letting the question stand. Two: enough to get past a model that asks
@@ -1936,9 +2009,27 @@ enum AgentToolLoop {
         }
     }
 
-    static func shouldStopAfterToolOutcome(_ outcome: AgentLoopToolOutcome) -> Bool {
+    static func shouldStopAfterToolOutcome(
+        _ outcome: AgentLoopToolOutcome,
+        heldErrorReplays: Int = 0
+    ) -> Bool {
         guard outcome.wasError || ToolEnvelope.isError(outcome.result) else { return false }
-        if outcome.wasDeduped { return true }
+        if outcome.wasDeduped {
+            // A replayed retrieval failure (`search_and_extract`: the same
+            // URL failed as-is) is not a side effect, and the escalation
+            // notice staged with the replay tells the model to change the
+            // source. Ornith 9B research run (2026-09-06, reasoning on): the
+            // second identical 404 ended the whole turn with "The requested
+            // action was not completed." before that notice could reach the
+            // model. Let it land once; the same call replayed AGAIN ends the
+            // run exactly as before.
+            if AgentTaskState.isRetrievalAsIsFailureTool(outcome.invocation.toolName),
+                heldErrorReplays <= 1
+            {
+                return false
+            }
+            return true
+        }
         if isRecoverableTodoContractResult(outcome.result) { return false }
         if isTerminalDesktopSubagentFailure(
             toolName: outcome.invocation.toolName,
@@ -2503,7 +2594,8 @@ enum AgentToolLoop {
                 consecutiveAnnouncedToolCalls += 1
                 totalAnnouncedToolCallRetries += 1
                 if consecutiveAnnouncedToolCalls <= Self.maxAnnouncedToolCallRetries {
-                    replaceStateNotice(Self.announcedToolCallNotice)
+                    replaceStateNotice(
+                        Self.announcedToolCallNotice(recovery: hooks.announcedToolCallRecovery?()))
                     // Not charged against the tool-iteration budget.
                     iteration -= 1
                     continue
@@ -2934,7 +3026,15 @@ enum AgentToolLoop {
                         return await finishBatch(.cancelled)
                     }
                     if policy.stopOnToolRejection,
-                        let rejected = outcomes.first(where: Self.shouldStopAfterToolOutcome)
+                        let rejected = outcomes.first(where: {
+                            Self.shouldStopAfterToolOutcome(
+                                $0,
+                                heldErrorReplays: state.heldErrorReplayCount(
+                                    name: $0.invocation.toolName,
+                                    argsJSON: $0.invocation.jsonArguments
+                                )
+                            )
+                        })
                     {
                         await emitToolRejection(rejected)
                         return await finishBatch(.toolRejected)
@@ -3085,7 +3185,13 @@ enum AgentToolLoop {
                                 replaceStateNotice(Self.dedupeNotice)
                             }
                             if policy.stopOnToolRejection,
-                                Self.shouldStopAfterToolOutcome(outcome)
+                                Self.shouldStopAfterToolOutcome(
+                                    outcome,
+                                    heldErrorReplays: state.heldErrorReplayCount(
+                                        name: invocation.toolName,
+                                        argsJSON: invocation.jsonArguments
+                                    )
+                                )
                             {
                                 await emitToolRejection(outcome)
                                 return RunResult(exit: .toolRejected, iterations: iteration)

@@ -723,6 +723,45 @@ struct AgentToolLoopTests {
         }
     }
 
+    /// Ornith 9B, folder attached, file_write available (2026-09-06, session
+    /// 58544EC9, run 063659): these three endings closed R1/R2/R3 as final
+    /// answers with zero announce notices because the closing-sentence rule
+    /// only knew try/fetch/check/read/search/run/open/look/pull/grab. Each is
+    /// a promise of work, so each must be recovered.
+    @Test func closingSentenceAnnouncementsFromTheFolderRunAreRecoverable() {
+        let endings = [
+            "I have solid sources now. Let me get one more with scientific detail on the mechanism and cocoa powder specifics.",
+            "I have enough sources. Let me write the research report to the host files folder.",
+            "No, I haven't written the file yet. Let me do that now.",
+            "I have four solid sources. Let me get one more specifically on the cocoa/chocolate clinical study to complete the picture.",
+        ]
+        for text in endings {
+            #expect(AgentLoopModelStep.isAnnounceOnly(text), "must be recovered: \(text)")
+            let step = AgentLoopModelStep.classifyTerminal(
+                contentIsBlank: false,
+                thinkingIsBlank: true,
+                stopReason: "stop",
+                requiresVisibleFinalResponse: false,
+                toolsWereOffered: true,
+                content: text
+            )
+            guard case .announcedToolCall = step else {
+                Issue.record("announce-only closing sentence must not end the run: \(text)")
+                return
+            }
+        }
+        // Sign-offs and requests to the user that open the same way stay final.
+        let signOffs = [
+            "The report is at hostfiles/report.md. Let me know if you want the sources expanded.",
+            "Done. I'll be here if you need more.",
+            "The file is written and verified. I will wait for your review before continuing.",
+            "That page is blocked everywhere I tried. I'll need a different source from you to go further.",
+        ]
+        for text in signOffs {
+            #expect(!AgentLoopModelStep.isAnnounceOnly(text), "must stay final: \(text)")
+        }
+    }
+
     /// The guard that matters most: a real answer must never be re-run. A
     /// false positive here costs the user a duplicated response.
     @Test func genuineAnswersStayFinal() {
@@ -1607,6 +1646,74 @@ struct AgentToolLoopTests {
         )
         #expect(result.exit == .finalResponse)
         #expect(surface.builtNotices.count == 2)
+    }
+
+    /// Ornith 9B research run (2026-09-06, reasoning on): the second identical
+    /// `search_and_extract` of a 404 page was replayed from the hold and the
+    /// deduped error ended the WHOLE turn ("The requested action was not
+    /// completed.") before the staged escalation notice could reach the
+    /// model. A replayed retrieval failure has no side effect to protect, so
+    /// the notice lands once; the same call replayed AGAIN ends the run.
+    @Test func repeatedAsIsExtractionFailureContinuesOnceWithTheEscalationNotice() async throws {
+        let args = #"{"url":"https://example.org/blocked"}"#
+        let surface = ScriptedLoopSurface(steps: [
+            .toolCalls([inv("search_and_extract", args)]),
+            .toolCalls([inv("search_and_extract", args)]),
+            .toolCalls([inv("search_and_extract", args)]),
+            .finalResponse,
+        ])
+        surface.toolResults["search_and_extract"] = AgentLoopToolExecution(
+            result: ToolEnvelope.failure(
+                kind: .executionError,
+                message: "No page content was retrieved from any attempted source.",
+                tool: "search_and_extract",
+                retryable: false
+            ),
+            isError: true
+        )
+        let result = try await AgentToolLoop.run(
+            policy: chatPolicy(),
+            state: AgentTaskState(),
+            hooks: surface.makeHooks()
+        )
+        // Executed once; the second call is a replay that does NOT end the
+        // run, so a third model step happens and carries the escalation.
+        #expect(surface.executedCalls.count == 1)
+        #expect(surface.dedupedCalls.count == 2)
+        #expect(surface.builtNotices.count == 3)
+        #expect(surface.builtNotices[2].contains { $0.contains("has now failed 2 times") })
+        // The third identical call (second replay) ends the run as before.
+        #expect(result.exit == .toolRejected)
+
+        // Batch executor surface (what chat installs): same contract.
+        let batched = ScriptedLoopSurface(steps: [
+            .toolCalls([inv("search_and_extract", args)]),
+            .toolCalls([inv("search_and_extract", args)]),
+            .toolCalls([inv("search_and_extract", args)]),
+            .finalResponse,
+        ])
+        var batchedHooks = batched.makeHooks()
+        batchedHooks.executeBatch = { calls in
+            calls.map { _ in
+                AgentLoopToolExecution(
+                    result: ToolEnvelope.failure(
+                        kind: .executionError,
+                        message: "No page content was retrieved from any attempted source.",
+                        tool: "search_and_extract",
+                        retryable: false
+                    ),
+                    isError: true
+                )
+            }
+        }
+        let batchedResult = try await AgentToolLoop.run(
+            policy: chatPolicy(),
+            state: AgentTaskState(),
+            hooks: batchedHooks
+        )
+        #expect(batched.builtNotices.count == 3)
+        #expect(batched.builtNotices[2].contains { $0.contains("has now failed 2 times") })
+        #expect(batchedResult.exit == .toolRejected)
     }
 
     @Test func identicalRepeatedFailureIsTerminal() {
@@ -3129,4 +3236,48 @@ struct CompactionWatermarkIdentityTests {
         watermark.validate(against: [ChatMessage(role: "user", content: "stable")])
         #expect(watermark.droppedCount == 1)
     }
+
+    /// Ornith research run (2026-09-06): the Web Researcher's schema had no
+    /// file tool, so "Let me write the markdown file…" could never become a
+    /// call, and the bare nudge told the model to emit that call anyway. The
+    /// nudge names the tools that exist and says what to do when the needed
+    /// one is absent. Fails before the change (the notice never named a tool).
+    @MainActor @Test func announceOnlyNoticeClassifiesExposedLoadableAndWorkspaceBlockedTools() async throws {
+        let surface = ScriptedLoopSurface(steps: [.announcedToolCall, .finalResponse])
+        var hooks = surface.makeHooks()
+        hooks.announcedToolCallRecovery = {
+            AgentToolLoop.AnnouncedToolCallRecovery(
+                exposed: ["web_search", "search_and_extract", "share_artifact"],
+                loadable: ["get_current_time"],
+                loaderName: "capabilities",
+                workspaceBlocked: ["file_write", "file_read"]
+            )
+        }
+        _ = try await AgentToolLoop.run(policy: chatPolicy(), state: AgentTaskState(), hooks: hooks)
+        let notice = surface.builtNotices.flatMap { $0 }.first { $0.contains("described a tool call but did not actually emit one") }
+        let text = try #require(notice)
+        #expect(text.contains("call right now in this chat are: search_and_extract, share_artifact, web_search."))
+        #expect(text.contains("not loaded yet; call capabilities with ids [\"tool/<name>\"] first, then emit the call: get_current_time."))
+        #expect(text.contains("file_read, file_write need a workspace attached to THIS chat and there is none"))
+        #expect(text.contains("attach a folder via the Folder chip"))
+        #expect(text.contains("(share_artifact can carry it)."))
+        #expect(!text.contains("get_current_time need a workspace"))
+
+        // Without a classification the notice is the bare nudge (no fabricated list).
+        let bare = ScriptedLoopSurface(steps: [.announcedToolCall, .finalResponse])
+        _ = try await AgentToolLoop.run(policy: chatPolicy(), state: AgentTaskState(), hooks: bare.makeHooks())
+        let bareNotice = try #require(bare.builtNotices.flatMap { $0 }.first { $0.contains("described a tool call") })
+        #expect(!bareNotice.contains("call right now in this chat"))
+        #expect(!bareNotice.contains("need a workspace attached"))
+        #expect(AgentToolLoop.announcedToolCallNotice(recovery: .init()) == AgentToolLoop.announcedToolCallNotice)
+
+        // Nothing blocked, nothing loadable: only the exposed list and the generic tail.
+        let onlyExposed = AgentToolLoop.announcedToolCallNotice(
+            recovery: .init(exposed: ["web_search"]))
+        #expect(onlyExposed.contains("call right now in this chat are: web_search."))
+        #expect(!onlyExposed.contains("not loaded yet"))
+        #expect(!onlyExposed.contains("need a workspace attached"))
+        #expect(onlyExposed.contains("say plainly that you cannot do it in this chat"))
+    }
+
 }

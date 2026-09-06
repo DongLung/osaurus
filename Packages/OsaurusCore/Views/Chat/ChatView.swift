@@ -6860,6 +6860,7 @@ final class ChatSession: ObservableObject {
                         if let violation = forcedToolGate.violationEnvelope(calledTool: inv.toolName) {
                             return AgentLoopToolExecution(result: violation)
                         }
+                        let toolStartedAt = Date()
                         do {
                             // Never print a direct secret-set value to the
                             // process log. Execution below still receives the
@@ -6915,6 +6916,12 @@ final class ChatSession: ObservableObject {
                                             }
                                     }
                                 }
+                                                // Wall time of the execution itself, so a tool that
+                                                // returns late (a blocked page trickling bytes for
+                                                // minutes) is visible in the run log.
+                                                print(
+                                                    "[Osaurus][Tool] Elapsed: \(inv.toolName) \(Int(Date().timeIntervalSince(toolStartedAt) * 1000)) ms"
+                                                )
                                                 return await postProcessToolResult(
                                                     inv,
                                                     callId: callId,
@@ -6932,6 +6939,9 @@ final class ChatSession: ObservableObject {
                             // run (remaining calls in the batch are skipped). Turn persistence
                             // happens in `onBatchComplete`, in slot order.
                             let rejectionMessage = ToolEnvelope.fromError(error, tool: inv.toolName)
+                            let failedAfterMs = Int(Date().timeIntervalSince(toolStartedAt) * 1000)
+                            let failureKind: String = (error is CancellationError) ? "cancelled" : String(describing: type(of: error))
+                            print("[Osaurus][Tool] Elapsed: \(inv.toolName) \(failedAfterMs) ms (threw: \(failureKind))")
                             // A spawn that threw (failed/cancelled/over-budget)
                             // may still have deposited artifacts its worker
                             // shared before dying — surface them anyway.
@@ -7791,7 +7801,18 @@ final class ChatSession: ObservableObject {
                     // `tool_not_found` notice. Assigned after construction so
                     // the hooks literal above stays type-checkable.
                     loopHooks.authorizedToolNames = { toolScope.authorizedNames }
+                    // The announce-only nudge classifies the rest of the
+                    // registry against the same live scope: callable now,
+                    // one load away, or blocked until a folder is attached.
+                    loopHooks.announcedToolCallRecovery = {
+                        ToolRegistry.shared.announcedToolCallRecovery(
+                            exposed: toolScope.authorizedNames,
+                            agentId: effectiveAgentId,
+                            loaderPermitted: { toolScope.permits($0) }
+                        )
+                    }
 
+                    let loopStartedAt = Date()
                     let runResult = try await AgentToolLoop.run(
                         policy: AgentLoopPolicy(
                             maxIterations: maxAttempts,
@@ -7806,6 +7827,10 @@ final class ChatSession: ObservableObject {
                         hooks: loopHooks
                     )
 
+                    print(
+                        "[Osaurus][Loop] exit=\(runResult.exit) iterations=\(runResult.iterations) "
+                            + "elapsedMs=\(Int(Date().timeIntervalSince(loopStartedAt) * 1000))"
+                    )
                     if runResult.exit == .toolRejected {
                         // A rejected/failed tool row is already recorded in
                         // history for the user and for the model-visible
@@ -7817,6 +7842,22 @@ final class ChatSession: ObservableObject {
                         // fingerprint immediately after a tool failure,
                         // making the next send look like a cold prefill.
                         lastStreamError = "Tool call failed."
+                        // The turn that closed on the rejection is terminal:
+                        // stamp it so the persisted row can be told apart
+                        // from an in-flight step (an Ornith research run
+                        // that ended this way left NULL, indistinguishable
+                        // from a run still working). Never "cancelled" — the
+                        // stop path keeps its own marker for that.
+                        // `assistantTurn` may already be the fresh, empty
+                        // placeholder the batch path swaps in after a tool
+                        // result (run 070139 stamped a blank row); stamp the
+                        // turn that actually closed on the rejection — the
+                        // last assistant turn with content or a call.
+                        if let closing = turns.last(where: {
+                            $0.role == .assistant && !Self.isEmptyAssistantPlaceholder($0)
+                        }), closing.terminalStopReason == nil {
+                            closing.terminalStopReason = "tool_rejected"
+                        }
                     }
 
                     if runResult.exit == .overBudget {
