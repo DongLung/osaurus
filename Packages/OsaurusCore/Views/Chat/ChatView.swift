@@ -8268,19 +8268,32 @@ struct ChatView: View {
             excludingSession: session)
     }
 
+    /// The sibling TAB in this window whose local-model run holds the slot,
+    /// if that is the blocker. Tabs share the single inference slot exactly
+    /// like windows do, but the fix is one click away: jump to that tab.
+    private var blockingSiblingTab: ChatTab? {
+        windowState.tabs.first { $0.session !== session && $0.session.isStreamingLocalModel }
+    }
+
     /// Telling someone to "wait for that reply to finish" is only true while a
     /// window still shows the reply. When the owning window was closed the run
     /// detaches and keeps the single local-model slot, so that sentence sends
     /// the user to look for something that does not exist — reported in #2343,
     /// where the only way out was restarting the app.
     private var localModelBusyMessage: String {
-        blockingDetachedTaskId == nil
-            ? L(
-                "Only one local model can run at a time, and another chat window is using it right now. Wait for that reply to finish, or switch this chat to a remote model."
-            )
-            : L(
+        if blockingDetachedTaskId != nil {
+            return L(
                 "Only one local model can run at a time. A reply is still running in the background from a chat window you closed. Reopen it to watch it finish, stop it to free the model, or switch this chat to a remote model."
             )
+        }
+        if blockingSiblingTab != nil {
+            return L(
+                "Only one local model can run at a time, and another tab in this window is using it right now. Wait for that reply to finish, stop it, or switch this chat to a remote model."
+            )
+        }
+        return L(
+            "Only one local model can run at a time, and another chat window is using it right now. Wait for that reply to finish, or switch this chat to a remote model."
+        )
     }
 
     /// The cancel capability already existed (`BackgroundTaskManager.cancelTask`)
@@ -8290,6 +8303,13 @@ struct ChatView: View {
     /// keeps the lock, which is a product decision left open in #2343.
     private var localModelBusyButtons: [AlertButtonConfig] {
         guard let taskId = blockingDetachedTaskId else {
+            if let tab = blockingSiblingTab {
+                return [
+                    .destructive(L("Stop it")) { tab.session.stop() },
+                    .primary(L("Go to that tab")) { windowState.selectTab(id: tab.id) },
+                    .cancel(L("Not now")),
+                ]
+            }
             return [.cancel(L("OK"))]
         }
         return [
@@ -8897,6 +8917,14 @@ struct ChatView: View {
                                     agentId: sessionData.agentId,
                                     sessionData: sessionData
                                 )
+                            },
+                            onOpenInNewTab: { sessionData in
+                                windowState.openProjectId = nil
+                                windowState.enteredChatFromProjectPage = false
+                                windowState.openSessionInNewTab(sessionData)
+                            },
+                            onSelectAgent: { newAgentId in
+                                windowState.switchAgent(to: newAgentId)
                             }
                         )
                     }
@@ -9133,13 +9161,13 @@ struct ChatView: View {
                 .animation(theme.animationQuick(), value: windowState.openProjectId)
             }
         }
-        // Allow the window to narrow down to 550pt so it tiles comfortably
-        // beside other windows. The content is responsive (the selector chips
-        // collapse to icons, the thread is width-capped and centered), so a
-        // narrow width just reflows the same UI rather than clipping it. Ideal
-        // width stays wide for the default/unconstrained window size.
+        // Allow the window to narrow down to 680pt so it tiles beside other
+        // windows. With the sidebar open by default (260pt) plus the tab strip,
+        // anything narrower squished the chat column; the content is responsive
+        // (chips collapse to icons, tabs fold into an overflow menu), so a narrow
+        // width reflows the same UI rather than clipping it.
         .frame(
-            minWidth: 550,
+            minWidth: 680,
             idealWidth: 950,
             maxWidth: .infinity,
             minHeight: 575,
@@ -9726,6 +9754,9 @@ struct ChatView: View {
     // MARK: - Header
 
     private var chatHeader: some View {
+        // Team layout: no agent identity in the chat header — the sidebar's
+        // Agents list (open by default) carries the selection; project
+        // membership shows as a folder glyph on the session tab.
         Color.clear
             .frame(height: 52)
             .allowsHitTesting(false)
