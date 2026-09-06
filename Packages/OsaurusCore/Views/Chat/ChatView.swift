@@ -2546,13 +2546,43 @@ final class ChatSession: ObservableObject {
         else { return false }
         queuedSend = nil
         let turn = ChatTurn(role: .user, content: pending.text)
-        turns.append(turn)
+        appendMidRunUserTurn(turn)
         isDirty = true
         rebuildVisibleBlocks()
         // A new user message resets the within-message dedupe/bias tracking,
         // mirroring what `send(...)` does at the top of a run.
         taskState.beginMessage()
         return true
+    }
+
+    /// Append the queued steer's user turn at an iteration boundary. The tool
+    /// loop appends the NEXT iteration's
+    /// empty assistant placeholder right after each tool result — before the
+    /// driver's `buildMessages` hook injects the steer — so a plain
+    /// `turns.append` lands the user turn after that placeholder. The model
+    /// then fills the placeholder with its call and the call's result is
+    /// appended after the steer, persisting `[assistant(call), user(steer),
+    /// tool(result)]` for the rest of the session: the user's instruction
+    /// reads as arriving after the model's own call, with the result after
+    /// it, on every later iteration and turn. Insert before a trailing empty
+    /// placeholder instead; the placeholder object keeps its identity so the
+    /// stream still lands in it. Only the iteration-boundary steer uses this:
+    /// there the trailing placeholder is guaranteed fresh (no delta has
+    /// streamed into it yet). `appendInterruptMessage` stops the run right
+    /// after appending and keeps its own shape.
+    func appendMidRunUserTurn(_ turn: ChatTurn) {
+        if let last = turns.last, Self.isEmptyAssistantPlaceholder(last) {
+            turns.insert(turn, at: turns.count - 1)
+        } else {
+            turns.append(turn)
+        }
+    }
+
+    static func isEmptyAssistantPlaceholder(_ turn: ChatTurn) -> Bool {
+        turn.role == .assistant
+            && turn.contentIsEmpty
+            && turn.thinkingIsEmpty
+            && (turn.toolCalls ?? []).isEmpty
     }
 
     /// Stop the currently streaming run and immediately dispatch the queued
@@ -7142,7 +7172,12 @@ final class ChatSession: ObservableObject {
                             // during the run joins the conversation at this
                             // iteration boundary instead of waiting for the
                             // run to finish (or requiring Stop).
-                            self.injectQueuedSteerIfEligible()
+                            // A steer that lands here starts a new user
+                            // message: the state notices the driver staged for
+                            // the previous message no longer describe this one.
+                            let notices = self.injectQueuedSteerIfEligible()
+                                ? AgentToolLoop.noticesSurvivingNewUserMessage(notices)
+                                : notices
 
                             ttftTrace?.mark("build_messages_start")
                             var msgs = buildMessages()
@@ -7930,6 +7965,16 @@ final class ChatSession: ObservableObject {
                                     selectedModel: turnModelId
                                 )
                                 assistantTurn = finalTurn
+                                // A wrap-up that streamed only thinking (or
+                                // nothing) leaves an empty bubble at the end
+                                // of a capped run (seen live: 31 inspect
+                                // calls, then a 23-token think-only final
+                                // with `stop`). Show the honest status the
+                                // notice asked for instead of nothing.
+                                if finalTurn.contentIsBlank {
+                                    finalTurn.content = AgentToolLoop.iterationCapEmptyWrapUpText
+                                    rebuildVisibleBlocks()
+                                }
                             } catch {
                                 let message =
                                     "The agent reached the configured step limit, and its final wrap-up failed: "
