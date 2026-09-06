@@ -157,10 +157,30 @@ public final class AgentTaskState {
     /// `read_knowledge` qualifies because its `not_found` for the same
     /// document path is deterministic on an unchanged store; a knowledge
     /// write to that path clears the held error via the shared write rules.
+    /// `osaurus_inspect` / `osaurus_help` qualify too: an `invalid_args`
+    /// rejection for the same scope/arguments is a pure function of the
+    /// call (observed live: 31 identical `osaurus_inspect` executions in one
+    /// turn, each re-run for nothing). Replaying the held rejection costs no
+    /// execution; it does not, by itself, stop a model that ignores it.
+    /// `osaurus_config` qualifies for its PRE-EXECUTION validation failures
+    /// only: an `invalid_args` / `not_found` rejection (a stdio server given
+    /// `auth: none`, a section that does not exist) is decided by the planner
+    /// before anything is written, so the identical document is rejected the
+    /// same way every time (observed: nine identical validation failures
+    /// executed nine times). Approval waits, cancellations and execution
+    /// errors are other kinds and are never held; a successful write drops
+    /// every held configuration error (see `record`) because later
+    /// validation may depend on the state it changed.
     private static let deterministicErrorTools: Set<String> = [
         "file_read", "file_search", "file_edit", "capabilities_load",
-        "read_knowledge",
+        "read_knowledge", "osaurus_inspect", "osaurus_help", "osaurus_config",
     ]
+
+    /// The configuration reads whose held rejections a configuration write
+    /// invalidates (see `record`).
+    private static let configurationReadTools: Set<String> = ["osaurus_inspect", "osaurus_help"]
+    /// The configuration writes that can change what those reads return.
+    private static let configurationWriteTools: Set<String> = ["osaurus_config"]
 
     /// Read-like tools that can explicitly classify a failure as
     /// non-retryable for the exact same arguments. `search_and_extract` uses
@@ -607,6 +627,23 @@ public final class AgentTaskState {
             heldErrorReplays.removeAll(keepingCapacity: true)
             transientFailureExecutions.removeAll(keepingCapacity: true)
             successfulEditSnapshots.removeAll(keepingCapacity: true)
+        }
+
+        // A configuration write (`osaurus_config apply` / any declarative
+        // mutation) can create the agent, MCP server, schedule… that a held
+        // `osaurus_inspect` "no <scope> matched" rejection complained about,
+        // so every held inspect/help error is dropped after one: the
+        // identical read must re-execute against the new state. Reads that
+        // failed for a reason the write cannot change (a junk scope) simply
+        // fail again once, which is cheap.
+        if Self.configurationWriteTools.contains(name), ToolEnvelope.isSuccess(result) {
+            for key in heldErrors.keys
+            where Self.configurationReadTools.contains(key.name)
+                || Self.configurationWriteTools.contains(key.name)
+            {
+                heldErrors[key] = nil
+                heldErrorReplays[key] = nil
+            }
         }
 
         // A write/edit invalidates any fresh read of the same path so the

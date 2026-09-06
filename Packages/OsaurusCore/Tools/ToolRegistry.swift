@@ -921,7 +921,27 @@ public final class ToolRegistry: ObservableObject {
         // plugin GROUP that happens to share an alias name (`plugin/fetch`)
         // keeps its own load rescue instead of being steered away from the
         // capability the user deliberately installed.
-        if toolsByName[name] == nil, Self.hallucinatedFetchToolNames.contains(name.lowercased()),
+        // A prefix-dropped plugin tool name: the Exa plugin registers
+        // `exa_search_web_fetch_exa`; the model (Ornith, 2026-09-05 report)
+        // called `web_fetch_exa`. When exactly ONE tool exposed to THIS
+        // request ends in `_<name>`, point the model at that real name — the
+        // tool it was shown, not a guess. Ambiguity (two candidates) falls
+        // through to the generic handling; nothing is executed here.
+        if toolsByName[name] == nil, let intended = uniqueExposedSuffixMatch(for: name) {
+            ToolRegistryLogger.registry.notice(
+                "steering prefix-dropped tool '\(name, privacy: .public)' to '\(intended, privacy: .public)'"
+            )
+            return ToolErrorEnvelope(
+                kind: .toolNotFound,
+                reason:
+                    "There is no '\(name)' tool. The tool you mean is named '\(intended)' — "
+                    + "call it with that exact name\(schemaHint(for: intended)).",
+                toolName: name,
+                retryable: true
+            ).toJSONString()
+        }
+
+        if toolsByName[name] == nil, Self.isHallucinatedFetchToolName(name),
             toolsByName["search_and_extract"] != nil,
             ChatExecutionContext.toolExecutionScope?.permits("search_and_extract") == true,
             groupIdCallRescueEnvelope(for: name) == nil
@@ -1513,17 +1533,40 @@ public final class ToolRegistry: ObservableObject {
         // `ToolOutputCompressor`.
         let payload = ToolOutputCompressor.compact(raw)
 
+        // The cap protects a TOKEN budget (~25K tokens), and tokens track
+        // UTF-8 bytes far better than Swift characters: a 100,000-character
+        // CJK/emoji-heavy payload is ~300 KB and ~3× the tokens of ASCII.
+        // Measure in bytes; slice in characters at the proportional length so
+        // ASCII payloads behave exactly as before (bytes == characters).
         let cap = ToolOutputCaps.universalResult
         let isEnvelope = ToolEnvelope.isSuccess(payload) || ToolEnvelope.isError(payload)
+        let byteCount = payload.utf8.count
 
-        if payload.count <= cap {
+        if byteCount <= cap {
             return isEnvelope ? payload : ToolEnvelope.success(tool: tool, text: payload)
         }
-
         // Head-biased: at the registry backstop the front of an oversized
         // payload is what identifies it (the recovery hint rides in the
-        // envelope, not the marker).
-        let truncatedContent = HeadTailTruncation.apply(payload, cap: cap, headFraction: 2.0 / 3.0)
+        // envelope, not the marker). The cap is a BYTE budget: a proportional
+        // character slice is only a first guess (mixed emoji/ASCII payloads
+        // are denser at one end than the other), so shrink the character
+        // budget until the kept text really fits.
+        var characterCap = max(1, Int(Double(cap) * Double(payload.count) / Double(byteCount)))
+        var truncatedContent = HeadTailTruncation.apply(payload, cap: characterCap, headFraction: 2.0 / 3.0)
+        var passes = 0
+        while truncatedContent.utf8.count > cap, characterCap > 1, passes < 12 {
+            passes += 1
+            characterCap = max(1, Int(Double(characterCap) * Double(cap) / Double(truncatedContent.utf8.count)))
+            truncatedContent = HeadTailTruncation.apply(payload, cap: characterCap, headFraction: 2.0 / 3.0)
+        }
+        // Character slicing cannot bound bytes when a single grapheme is
+        // larger than the budget (one base letter plus tens of thousands of
+        // combining marks is ONE Character), or when the pass limit ran out:
+        // the byte-exact cut is the guarantee, the loop above only the
+        // grapheme-friendly first choice.
+        if truncatedContent.utf8.count > cap {
+            truncatedContent = HeadTailTruncation.applyByteExact(payload, byteCap: cap, headFraction: 2.0 / 3.0)
+        }
         let hint =
             "Output exceeded the per-call cap and was truncated (head and tail kept). "
             + "Re-run with narrower arguments — filters, `max_results`, line ranges, or "
@@ -2526,11 +2569,60 @@ public final class ToolRegistry: ObservableObject {
     /// read-only extractor points AWAY from a `browser_use` sitting in the
     /// schema — and shell-intent names (`curl`), whose POST/API shapes
     /// extraction cannot serve.
+    /// The single registered tool, exposed to the current request, whose
+    /// name is `<group>_<name>` for the unregistered `name` the model used;
+    /// nil when there is none or more than one.
+    func uniqueExposedSuffixMatch(for name: String) -> String? {
+        let lower = name.lowercased()
+        guard lower.count >= 6 else { return nil }
+        let scope = ChatExecutionContext.toolExecutionScope
+        let candidates = toolsByName.keys.filter { registered in
+            registered.lowercased().hasSuffix("_" + lower)
+                && (scope?.permits(registered) ?? false)
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    /// " and its own arguments: required <a, b>; optional <c>" for the
+    /// steered-to tool, so the model does not carry the invented tool's
+    /// argument shape over (following "same arguments" got an invalid_args
+    /// rejection in the independent audit). Empty when the tool declares no
+    /// object schema.
+    func schemaHint(for registeredName: String) -> String {
+        guard let tool = toolsByName[registeredName],
+            case .object(let root)? = tool.parameters,
+            case .object(let props)? = root["properties"]
+        else { return "" }
+        var required: [String] = []
+        if case .array(let req)? = root["required"] {
+            required = req.compactMap { if case .string(let r) = $0 { return r } else { return nil } }
+        }
+        let optional = props.keys.filter { !required.contains($0) }.sorted()
+        var parts: [String] = []
+        if !required.isEmpty { parts.append("required: \(required.sorted().joined(separator: ", "))") }
+        if !optional.isEmpty { parts.append("optional: \(optional.joined(separator: ", "))") }
+        guard !parts.isEmpty else { return "" }
+        return " and its own arguments (\(parts.joined(separator: "; ")))"
+    }
+
     static let hallucinatedFetchToolNames: Set<String> = [
         "web_fetch", "webfetch", "fetch", "fetch_url", "fetch_page",
         "fetch_webpage", "http_get", "get_url", "get_webpage", "read_url",
         "read_webpage", "visit_page", "load_url", "url_fetch",
     ]
+
+    /// The exact set above plus the provider-suffixed shapes models invent
+    /// from other stacks (`web_fetch_exa` — the name in the Ornith research
+    /// report — `fetch_url_firecrawl`, `webfetch_tavily`): any unregistered
+    /// name that starts with `web_fetch`/`webfetch`/`fetch_` or ends with
+    /// `_fetch` is a fetch intent. Still consulted only for names with no
+    /// real registration.
+    static func isHallucinatedFetchToolName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        if hallucinatedFetchToolNames.contains(lower) { return true }
+        return lower.hasPrefix("web_fetch") || lower.hasPrefix("webfetch") || lower.hasPrefix("fetch_")
+            || lower.hasSuffix("_fetch")
+    }
 
     /// Built-in tools that are authoritatively gated per-agent and must never
     /// surface through `capabilities_discover`. Unlike the lean-by-default
