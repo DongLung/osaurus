@@ -74,3 +74,18 @@ On macOS 26+, the sandbox toggle on the input bar runs shell/code work inside an
 - Be specific; let the todo list show progress on long tasks.
 - On a custom agent, use a working folder for repo work, the sandbox for scripts and package installs, and neither for plain Q&A. On the Orchestrator, set a working folder when you want delegated work to land somewhere you can see; stay on it for setup, questions, and delegation.
 - Tool approvals are per-tool; you can grant "always allow" per agent in Permissions.
+
+
+## Choosing a model in chat
+
+Open the model pill to browse Provider and Model columns. Installed Local models come first, followed by active Osaurus Cloud models and connected providers. Inactive Local and Osaurus Cloud entries remain available with an Explore action. Local opens model downloads in Settings; Osaurus Cloud opens the Cloud model browser.
+
+The Cloud shortlist contains favorites plus the current Cloud model. Use the star to add or remove a favorite in either the shortlist or the full browser. More models opens the same Local or Cloud destination.
+
+In the Cloud browser, search by model name or provider and filter by Category or Context. Category tags identify each model’s task; models with available minimum pricing show From credits beneath their name. Selecting a model closes the browser, while starring a model keeps it open. Manage Credits opens your Cloud account controls.
+
+Selecting a model with multiple reasoning levels reveals a Reasoning column with the saved choice or model default selected. Selections keep the card open; click outside or press Escape to close it. Other model options remain available from Model options.
+
+## Credits in chat
+
+Hover over the Credits button to preview your wallet, or click to keep it open. The arrowless card aligns with the button's trailing edge and stays inside the chat window. If space is limited, scroll to reach the remaining activity and actions. Click outside or press Escape to dismiss it. Add credits opens the top-up dialog; View all opens Credits in Settings.

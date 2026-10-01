@@ -59,6 +59,16 @@ struct SettingsSearchSelfFindProbe {
     @Test("controls are findable by the label they display")
     func controlsFindableByOnScreenLabel() {
         let labels: [(query: String, entryID: String)] = [
+            ("Border Color", "themes.borders.color"),
+            ("Border Width", "themes.borders.width"),
+            ("Border Opacity", "themes.borders.opacity"),
+            ("model picker border", "themes.borders.color"),
+            ("Credits border", "themes.borders.color"),
+            ("menu border width", "themes.borders.width"),
+            ("dropdown border opacity", "themes.borders.opacity"),
+            ("Small body", "themes.typography.smallBody"),
+            ("compact controls", "themes.typography.smallBody"),
+            ("model picker", "themes.typography.smallBody"),
             ("Concurrent Sessions", "settings.server.concurrentSessions"),
             ("Prompt Prefill Chunk Size", "settings.server.prefillChunkSize"),
             ("Automatically Check Model Updates", "models.automaticUpdates"),
@@ -258,6 +268,35 @@ struct SettingsSearchSelfFindProbe {
         .map { "\"\($0.query)\" -> \($0.entryID)" }
 
         #expect(missed.isEmpty, "control labels that find nothing: \(missed)")
+    }
+
+    @Test("small body search targets theme typography")
+    func smallBodySearchTargetsTypographyControl() throws {
+        let entry = try #require(SettingsSearchIndex.search("Small body").first)
+        #expect(entry.id == "themes.typography.smallBody")
+        #expect(entry.tab == .themes)
+        #expect(entry.section == "Text & Fonts")
+        #expect(entry.title == "Small body")
+        #expect(entry.isSettingsUIOnly)
+        #expect(!SettingsSearchIndex.tabLevelEntryIDs.contains(entry.id))
+    }
+
+    @Test("menu border searches land on the default border controls")
+    func menuBorderSearchesTargetDefaultControls() throws {
+        let controls = [
+            (query: "model picker border", id: "themes.borders.color", title: "Border Color"),
+            (query: "Credits border", id: "themes.borders.color", title: "Border Color"),
+            (query: "model picker border width", id: "themes.borders.width", title: "Border Width"),
+            (query: "Credits border opacity", id: "themes.borders.opacity", title: "Border Opacity"),
+        ]
+        for control in controls {
+            let entry = try #require(SettingsSearchIndex.search(control.query).first)
+            #expect(entry.id == control.id)
+            #expect(entry.title == control.title)
+            #expect(entry.tab == .themes)
+            #expect(entry.section == "Borders & Effects")
+            #expect(!SettingsSearchIndex.tabLevelEntryIDs.contains(entry.id))
+        }
     }
 
     /// Guards the probe itself: an index that shrank to nothing, or a matcher
