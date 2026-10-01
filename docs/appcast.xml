@@ -3,6 +3,37 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.16</title>
+            <pubDate>Thu, 01 Oct 2026 06:00:58 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.16</sparkle:version>
+            <sparkle:shortVersionString>0.25.16</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.16/Osaurus-0.25.16.dmg" length="80538135" type="application/octet-stream" sparkle:edSignature="T8cgj5FhWtcLutuQGXn4fNllksiaUuotl4DM7l4Ud4ADou7aMYiITh1HCHbhpWIwBWbngC1BS6LVSzjGzyf1BQ=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- Pin MLX 0.32.3 for the crash-fix release (#2956) by @jjang-ai
+- Redesign chat model picker, Cloud browser and Credits menu (#2947) by @losingmyego
+- Settings UX/IA cleanup: grouped-form kit, renamed tabs, Tools \& MCP Services rework (#2950) by @tpae
+
+## 🐛 Bug Fixes
+
+- Pin runtime crash containment and allocator synchronization fixes (#2953) by @jjang-ai
+- Reject invalid process strings before Foundation launch (#2954) by @jjang-ai
+- only show the model switch advisory when leaving a local model (#2952) by @RaajeevChandran
+- fix: reject chunk transfers after lane invalidation (#2949) by @jjang-ai
+- Surface preparation errors and pin validated logits runtime (#2938) by @jjang-ai
+
+## 🧰 Maintenance
+
+- improved model banner ux (#2955) by @RaajeevChandran
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.15...0.25.16
+]]></description>
+        </item>
+        <item>
             <title>0.25.15</title>
             <pubDate>Tue, 29 Sep 2026 21:46:17 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
