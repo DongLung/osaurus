@@ -1133,7 +1133,12 @@ final class ChatSession: ObservableObject {
             .sink { [weak self] newModel in
                 guard let self = self, !self.isLoadingModel else { return }
                 guard let model = newModel else { return }
-                let previousModel = self.selectedModel
+                // Sending dismisses the advisory, so while one is up no turn
+                // has run on a newer model and the conversation still belongs
+                // to the model it was raised for.
+                // Compare against that one, so further hops keep naming it and
+                // switching back to it clears the advisory.
+                let previousModel = self.modelSwitchContinuityWarning?.previousModelId ?? self.selectedModel
                 // A shared-agent tab is remote for the whole switch, not only
                 // once the provider is bound: `adoptAgent` clears the provider
                 // id and applies the local default model before the rebind
