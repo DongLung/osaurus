@@ -1198,6 +1198,11 @@ struct MLXBatchAdapter {
                     ontoLevels: levels,
                     defaultLevel: defaultLevel
                 ) ?? requested
+            case .fixedNativeEffort:
+                // The bundle exposes no picker, but its engine still owns a
+                // strict native effort contract. Preserve explicit input so
+                // incompatible requests are rejected there instead of ignored.
+                return requested
             case .noEffortControl:
                 return nil
             case nil:
@@ -2189,6 +2194,20 @@ struct MLXBatchAdapter {
         }
     }
 
+    /// Preserve typed request refusals for HTTP and streaming error mapping.
+    /// Other preparation failures retain their existing diagnostic wrapper.
+    static func templatePreparationError(_ error: Error) -> Error {
+        if error is K2HorizonTemplateContract.ContractError { return error }
+        let detail =
+            (error as? LocalizedError)?.errorDescription
+            ?? String(describing: error)
+        return NSError(
+            domain: "MLXBatchAdapter",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Chat template error: \(detail)"]
+        )
+    }
+
     private static func prepareInput(
         modelName: String,
         container: ModelContainer,
@@ -2318,14 +2337,7 @@ struct MLXBatchAdapter {
                         }
                     }
                 } catch {
-                    let detail =
-                        (error as? LocalizedError)?.errorDescription
-                        ?? String(describing: error)
-                    throw NSError(
-                        domain: "MLXBatchAdapter",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Chat template error: \(detail)"]
-                    )
+                    throw Self.templatePreparationError(error)
                 }
                 box.processorDoneAt = CFAbsoluteTimeGetCurrent()
                 trace?.mark("batch_tokenization_done")
