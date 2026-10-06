@@ -186,6 +186,13 @@ final class ServerController: ObservableObject {
         }
     }
 
+    /// Why the server isn't taking requests, or nil while it is (or before
+    /// a controller is wired, when there is nothing to tell yet).
+    static func notRunningReason() -> String? {
+        guard let controller = ServerControllerHolder.shared.controller, !controller.isRunning else { return nil }
+        return controller.lastErrorMessage ?? L("The server isn't running.")
+    }
+
     /// Starts the server with current configuration
     func startServer() async {
         guard !isRunning else { return }
@@ -210,11 +217,27 @@ final class ServerController: ObservableObject {
             // Ensure any previous instance is shut down
             try await stopServerIfNeeded()
 
-            let server = OsaurusServer()
-            try await server.start(
-                .init(host: bindHost, port: configuration.port, trustLoopback: !configuration.exposeToNetwork),
-                serverConfiguration: self.configuration
-            )
+            // A port still held, most often by an Osaurus that is quitting
+            // as this one launches, is retried for a few seconds before
+            // giving up: otherwise the survivor runs with no server at all.
+            var attempt = 1
+            var server = OsaurusServer()
+            while true {
+                do {
+                    try await server.start(
+                        .init(host: bindHost, port: configuration.port, trustLoopback: !configuration.exposeToNetwork),
+                        serverConfiguration: self.configuration
+                    )
+                    break
+                } catch where Self.isAddressInUse(error) && attempt < Self.bindAttempts {
+                    MobileConnectLog.write(
+                        "server: port \(configuration.port) busy, retrying (\(attempt)/\(Self.bindAttempts))"
+                    )
+                    attempt += 1
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    server = OsaurusServer()
+                }
+            }
             self.serverActor = server
 
             // Update state
@@ -633,7 +656,7 @@ final class ServerController: ObservableObject {
         MobileConnectLog.write("server: FAILED to start on port \(configuration.port): \(error)")
         isRunning = false
         let desc = error.localizedDescription.lowercased()
-        if desc.contains("address already in use") || desc.contains("eaddrinuse") {
+        if Self.isAddressInUse(error) {
             lastErrorMessage =
                 "Port \(configuration.port) is already in use. Choose a different port in Settings."
         } else if desc.contains("permission denied") || desc.contains("eacces") {
@@ -642,6 +665,14 @@ final class ServerController: ObservableObject {
             lastErrorMessage = error.localizedDescription
         }
         serverHealth = .error(lastErrorMessage ?? error.localizedDescription)
+    }
+
+    /// Binds tried, a second apart, while the port is in use.
+    private static let bindAttempts = 6
+
+    private static func isAddressInUse(_ error: Error) -> Bool {
+        let desc = "\(error) \(error.localizedDescription)".lowercased()
+        return desc.contains("address already in use") || desc.contains("eaddrinuse") || desc.contains("errno: 48")
     }
 
     private func stopServerIfNeeded() async throws {

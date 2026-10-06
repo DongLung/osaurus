@@ -153,6 +153,14 @@ final class MobilePairingService: ObservableObject {
         }
         isGeneratingCode = true
         defer { isGeneratingCode = false }
+        // A code is only worth showing with the server up to take it: the
+        // phone would otherwise search for a Mac that never answers.
+        await ServerController.ensureRunning()
+        if let reason = ServerController.notRunningReason() {
+            MobileConnectLog.write("pairing: no code, the server isn't running: \(reason)")
+            lastError = L("Your Mac can't take a pairing right now. \(reason)")
+            return
+        }
         do {
             let label = Self.keyLabel
             let (minted, connectAddress) = try await Task.detached(priority: .userInitiated) {
