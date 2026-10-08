@@ -73,6 +73,15 @@ private final class SendableClientIPBox: @unchecked Sendable {
     }
 }
 
+private final class SendableFlagBox: @unchecked Sendable {
+    private var _value = false
+    private let _lock = NSLock()
+    var value: Bool {
+        get { _lock.withLock { _value } }
+        set { _lock.withLock { _value = newValue } }
+    }
+}
+
 private final class ChannelCloseFutureBox: @unchecked Sendable {
     private var future: EventLoopFuture<Void>?
     private let lock = NSLock()
@@ -226,6 +235,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     /// (loopback / LAN peer / first `X-Forwarded-For` hop for relay traffic).
     /// Attribution hint for Insights `inboundAPI` rows, never an identity claim.
     private let _clientIP = SendableClientIPBox()
+    /// Off-loop-readable mirror of `RequestState.isSecureChannel`, for
+    /// `logRequest`, which also runs from request tasks off the event loop.
+    private let _isSecureChannel = SendableFlagBox()
     private static let openResponsesContextStore = OpenResponsesContextStore()
 
     /// Internal marker header stamped by `RelayTunnelManager` on every request
@@ -427,7 +439,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         // key-less loopback-trusted ones without threading a flag through
         // every request struct.
         let callerContext = HTTPCallerContext(
-            hasVerifiedAccessKey: stateRef.value.callerHasVerifiedAccessKey
+            hasVerifiedAccessKey: stateRef.value.callerHasVerifiedAccessKey,
+            isSecureChannel: stateRef.value.isSecureChannel
         )
         // Activity-log double-write guard: these handlers write their own
         // Insights row with the HTTP request/response, so the in-process
@@ -461,6 +474,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             stateRef.value.bodyBytesSeen = 0
             stateRef.value.rejectedTooLarge = false
             stateRef.value.isSecureChannel = false
+            _isSecureChannel.value = false
             stateRef.value.secureChannelAgentAddress = nil
             stateRef.value.authedAudience = nil
             stateRef.value.authedScopeIsMaster = false
@@ -612,13 +626,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 stateRef.value.requestHead = head
                 stateRef.value.normalizedPath = path
                 stateRef.value.isSecureChannel = true
+                _isSecureChannel.value = true
             }
 
             // Access key authentication gate (all data snapshotted at server start, zero locks)
             // Plugin routes handle their own auth per-route, so skip the global gate.
             // Loopback connections (CLI / local tools) are trusted without a token.
             let publicPaths: Set<String> = [
-                "/", "/health", "/pair", "/pair/hello", "/pair/challenge", "/pair/code", "/pair-invite", "/secure/session",
+                "/", "/health", "/pair", "/pair/hello", "/pair/challenge", "/pair/code", "/pair/confirm", "/pair-invite",
+                "/secure/session",
             ]
             let isPluginRoute = path.hasPrefix("/plugins/")
             // Agent Channel webhook routes are authenticated by the connection's
@@ -745,6 +761,26 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                             path: path
                         )
                     }
+                    stateRef.value.requestHead = nil
+                    stateRef.value.requestBodyBuffer = nil
+                    return
+                }
+
+                // An owner key from a remote caller only ever travels inside
+                // the Secure Channel, reads included: chat history, live run
+                // streams, review queues and secret prompts are as private as
+                // the writes `requiresOwnerChannel` already guards. Except, for one
+                // release, the plain agent list (`legacyPlaintextRead`).
+                if stateRef.value.authedScopeIsMaster, Self.isOwnerChannelRoute(path),
+                    !Self.legacyPlaintextRead(method: head.method, path: path),
+                    sendSecureChannelUpgradeRequiredIfNeeded(
+                        head: head,
+                        context: context,
+                        path: path,
+                        startTime: startTime,
+                        userAgent: userAgent
+                    )
+                {
                     stateRef.value.requestHead = nil
                     stateRef.value.requestBodyBuffer = nil
                     return
@@ -969,8 +1005,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 handlePairEndpoint(head: head, context: context, startTime: startTime, userAgent: userAgent)
             } else if head.method == .GET, path == "/pair/hello" {
                 handlePairHelloEndpoint(head: head, context: context, startTime: startTime, userAgent: userAgent)
-            } else if head.method == .POST, path == "/pair/code" {
-                handlePairCodeEndpoint(head: head, context: context, startTime: startTime, userAgent: userAgent)
+            } else if head.method == .POST, path == "/pair/code" || path == "/pair/confirm" {
+                handlePairCodeEndpoint(head: head, context: context, path: path, startTime: startTime, userAgent: userAgent)
             } else if head.method == .POST, path == "/pair/unpair" {
                 handlePairUnpairEndpoint(head: head, context: context, startTime: startTime, userAgent: userAgent)
             } else if head.method == .POST, path == "/pair-invite" {
@@ -1086,6 +1122,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 )
             } else if head.method == .POST, path.hasPrefix("/sessions/"), path.hasSuffix("/truncate") {
                 handleSessionTruncateEndpoint(
+                    head: head,
+                    context: context,
+                    path: path,
+                    startTime: startTime,
+                    userAgent: userAgent
+                )
+            } else if head.method == .GET, path.hasPrefix("/images/jobs/"), path.hasSuffix("/events") {
+                handleImageJobEventsEndpoint(
                     head: head,
                     context: context,
                     path: path,
@@ -3614,7 +3658,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     /// ever carry a small JSON envelope.
     private func bodyByteLimit(for head: HTTPRequestHead) -> Int {
         let path = normalize(extractPath(from: head.uri))
-        if path == "/pair" || path == "/pair/code" || path == "/pair-invite" || path == "/secure/session" {
+        if path == "/pair" || path == "/pair/code" || path == "/pair/confirm" || path == "/pair-invite"
+            || path == "/secure/session"
+        {
             return configuration.maxPairingBodyBytes
         }
         return configuration.maxRequestBodyBytes
@@ -4672,7 +4718,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let custom_avatar: Bool?
         /// The agent's system prompt, on `GET /agents/{id}` and for owner
         /// callers only — a workspace peer has no business reading it.
-        let system_prompt: String?
+        var system_prompt: String?
         /// What the phone can change (§13.2): `GET /agents/{id}` for owner
         /// callers and custom agents only.
         var settings: PhoneAgentEditing.Settings? = nil
@@ -4824,10 +4870,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private func handlePairCodeEndpoint(
         head: HTTPRequestHead,
         context: ChannelHandlerContext,
+        path: String,
         startTime: Date,
         userAgent: String?
     ) {
-        let path = "/pair/code"
         let cors = stateRef.value.corsHeaders
 
         func reply(status: HTTPResponseStatus, body: String, logBody: String? = nil) {
@@ -4872,7 +4918,20 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         if var body = stateRef.value.requestBodyBuffer {
             data = Data(body.readBytes(length: body.readableBytes) ?? [])
         }
-        guard let request = try? JSONDecoder().decode(MobilePairRequest.self, from: data) else {
+        // v1 sends the code and a key to seal to; v2 (SPAKE2) never sends
+        // the code, and confirms in a second step on `/pair/confirm`.
+        struct Version: Decodable { let v: Int }
+        let decoder = JSONDecoder()
+        let redeem: @MainActor @Sendable () -> MobilePairingService.RedeemOutcome
+        if path == "/pair/confirm", let request = try? decoder.decode(MobilePairConfirmRequest.self, from: data) {
+            redeem = { MobilePairingService.shared.confirmExchange(request) }
+        } else if path == "/pair/code", (try? decoder.decode(Version.self, from: data))?.v == PairingSPAKE2.version,
+            let request = try? decoder.decode(MobilePairStartRequest.self, from: data)
+        {
+            redeem = { MobilePairingService.shared.startExchange(request) }
+        } else if path == "/pair/code", let request = try? decoder.decode(MobilePairRequest.self, from: data) {
+            redeem = { MobilePairingService.shared.redeem(request) }
+        } else {
             reply(status: .badRequest, body: #"{"error":"bad_request","message":"Invalid pairing request"}"#)
             return
         }
@@ -4881,7 +4940,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let ctx = NIOLoopBound(context, eventLoop: loop)
         let hop = Self.makeHop(channel: context.channel, loop: loop)
         runRequestTask(priority: .userInitiated) {
-            let outcome = await MainActor.run { MobilePairingService.shared.redeem(request) }
+            let outcome = await MainActor.run { redeem() }
             hop {
                 let context = ctx.value
                 var headers = [("Content-Type", "application/json; charset=utf-8")]
@@ -4897,6 +4956,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         (try? JSONEncoder().encode(response)).map { String(decoding: $0, as: UTF8.self) }
                         ?? #"{"error":"encoding_failed"}"#
                     logBody = #"{"v":1,"sealed":"<redacted>"}"#
+                case .answered(let answer, let redacted):
+                    MobileConnectLog.write("\(path): answered a v2 pairing step from \(pairingIP)")
+                    status = .ok
+                    body = answer
+                    logBody = redacted
                 case .invalidCode:
                     MobileConnectLog.write("pair/code: wrong or expired code from \(pairingIP)")
                     PairingRateLimiter.shared.penalize(ip: pairingIP)
@@ -5015,16 +5079,134 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         /// never a chat run; `edits` says `/images/edits` takes a source image.
         let kind: String
         let edits: Bool
+        /// For `kind: image` only: what the Mac's composer offers for this
+        /// model (size, steps, CFG, seed, strength, negative prompt), so the
+        /// phone can show the same controls (MOBILE_PROTOCOL.md §12.5).
+        let image: PickerImageDTO?
+        /// For a cloud image model only: its target, the choices its catalog
+        /// offers and its starting price, for the phone's controls and its
+        /// spend confirmation (MOBILE_PROTOCOL.md §12.5).
+        let cloud: PickerCloudImageDTO?
 
         enum CodingKeys: String, CodingKey {
             case id, name, provider, source, vision, thinking, params, quantization, available, description, tab
             case kind, edits
+            case image
+            case cloud
             case tabTitle = "tab_title"
             case favoriteKey = "favorite_key"
             case contextLength = "context_length"
             case inputPrice = "input_price"
             case outputPrice = "output_price"
             case externalSource = "external_source"
+        }
+    }
+
+    /// A cloud image model: where `/images/generations` sends it (`target`),
+    /// the catalog's choices, and the cheapest price, in USD and as the
+    /// Mac's own "From … credits" label. Billable: the phone confirms before
+    /// it sends `allow_remote_media_spend`.
+    private struct PickerCloudImageDTO: Encodable {
+        struct Target: Encodable {
+            let backend: String
+            let providerId: String?
+            let model: String
+
+            enum CodingKeys: String, CodingKey {
+                case backend, model
+                case providerId = "provider_id"
+            }
+        }
+
+        let target: Target
+        let aspectRatios: [String]
+        let defaultAspectRatio: String?
+        let resolutions: [String]
+        let defaultResolution: String?
+        let qualities: [String]
+        let defaultQuality: String?
+        let defaultSteps: Int?
+        let maxSteps: Int?
+        let promptCharacterLimit: Int?
+        let formats: [String]
+        let maxCount: Int
+        let minPriceUSD: Double?
+        let priceLabel: String?
+        let privacy: String?
+
+        enum CodingKeys: String, CodingKey {
+            case target, resolutions, qualities, formats, privacy
+            case aspectRatios = "aspect_ratios"
+            case defaultAspectRatio = "default_aspect_ratio"
+            case defaultResolution = "default_resolution"
+            case defaultQuality = "default_quality"
+            case defaultSteps = "default_steps"
+            case maxSteps = "max_steps"
+            case promptCharacterLimit = "prompt_character_limit"
+            case maxCount = "max_count"
+            case minPriceUSD = "min_price_usd"
+            case priceLabel = "price_label"
+        }
+
+        init?(_ item: ModelPickerItem) {
+            guard let media = item.mediaModel, media.kind == .image, media.isAvailable else { return nil }
+            switch media.target.backend {
+            case .local: return nil
+            case .remoteProvider(let id):
+                target = Target(backend: "remote_provider", providerId: id.uuidString, model: media.target.modelID)
+            case .osaurusCloud:
+                target = Target(backend: "osaurus_cloud", providerId: nil, model: media.target.modelID)
+            }
+            let c = media.constraints
+            aspectRatios = c.aspectRatios
+            defaultAspectRatio = c.defaultAspectRatio
+            resolutions = c.resolutions
+            defaultResolution = c.defaultResolution
+            qualities = c.qualities
+            defaultQuality = c.defaultQuality
+            defaultSteps = c.defaultSteps
+            maxSteps = c.maxSteps
+            promptCharacterLimit = c.promptCharacterLimit
+            formats = ImageOutputFormat.allCases.map(\.rawValue)
+            maxCount = 4
+            minPriceUSD = media.pricing?.minimumUSD
+            priceLabel = minPriceUSD.map { "From \(OsaurusRouter.formatUSDAsCredits($0))" }
+            privacy = media.privacy
+        }
+    }
+
+    /// Image controls for one model: the `/images/models` capabilities,
+    /// defaults and limits, plus the ranges the composer clamps to on send.
+    private struct PickerImageDTO: Encodable {
+        let capabilities: ImageCapabilitiesDTO
+        let defaults: ImageDefaultsDTO
+        let limits: ImageLimitsDTO
+        let maxGuidance: Double
+
+        enum CodingKeys: String, CodingKey {
+            case capabilities, defaults, limits
+            case maxGuidance = "max_guidance"
+        }
+
+        init?(_ item: ModelPickerItem) {
+            guard item.isPhoneImageModel, let caps = item.imageCapabilities else { return nil }
+            capabilities = ImageCapabilitiesDTO(
+                text_to_image: caps.textToImage,
+                image_edit: caps.imageEdit,
+                upscale: caps.upscale,
+                negative_prompt: caps.negativePrompt,
+                edit_negative_prompt: caps.editNegativePrompt,
+                edit_strength: caps.editStrength,
+                mask: caps.mask,
+                multiple_source_images: caps.multipleSourceImages,
+                lora: caps.lora
+            )
+            defaults = ImageDefaultsDTO(
+                steps: item.imageDefaultSteps,
+                guidance: item.imageDefaultGuidance.map { Double($0) }
+            )
+            limits = ImageHTTPParameterBuilder.limits(canonicalName: item.imageCanonicalName, capabilities: caps)
+            maxGuidance = 20
         }
     }
 
@@ -5074,10 +5256,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let cors = stateRef.value.corsHeaders
         let hop = Self.makeHop(channel: context.channel, loop: loop)
         runRequestTask(priority: .userInitiated) {
-            // Chat models plus ready on-device image models, which the Mac
-            // picker also lists (picking one puts the composer in image mode).
+            // Chat models, ready on-device image models and available cloud
+            // image models, which the Mac picker also lists (picking one puts
+            // the composer in image mode).
             let items = await ModelPickerItemCache.shared.buildModelPickerItems()
-                .filter { $0.isLikelyChatCapable || $0.isPhoneImageModel }
+                .filter { $0.isLikelyChatCapable || $0.isPhoneImageModel || PickerCloudImageDTO($0) != nil }
             let favorites = await MainActor.run { FavoriteModelsStore.shared.favoriteKeys }
             // Grouped as the Mac picker groups them, so the phone shows the
             // same tabs in the same order.
@@ -5092,13 +5275,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 case .remote: source = "remote"
                 case .imageGeneration: source = "image"
                 }
+                let cloud = PickerCloudImageDTO(item)
                 return PickerModelDTO(
                     id: item.id,
                     name: item.displayName,
                     provider: item.source.displayName,
                     source: source,
                     vision: item.isVLM,
-                    thinking: ModelProfileRegistry.profile(for: item.id)?.thinkingOption != nil,
+                    // An image model never thinks, whatever chat profile its name matches.
+                    thinking: cloud == nil && !item.isPhoneImageModel
+                        && ModelProfileRegistry.profile(for: item.id)?.thinkingOption != nil,
                     params: item.parameterCount,
                     quantization: item.quantization,
                     available: source != "local" || item.isMLXFormat,
@@ -5110,8 +5296,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     inputPrice: item.inputPriceMicroPerMTok,
                     outputPrice: item.outputPriceMicroPerMTok,
                     externalSource: item.externalSource,
-                    kind: item.isPhoneImageModel ? "image" : "chat",
-                    edits: item.isImageEditDelegateCandidate
+                    kind: item.isPhoneImageModel || cloud != nil ? "image" : "chat",
+                    // Cloud models can't edit over HTTP yet.
+                    edits: cloud == nil && item.isImageEditDelegateCandidate,
+                    image: PickerImageDTO(item),
+                    cloud: cloud
                 )
             }
             let json =
@@ -5382,6 +5571,36 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let hop = Self.makeHop(channel: context.channel, loop: loop)
         let isWrite = head.method == .PUT
         runRequestTask(priority: .userInitiated) {
+            // An image model has no chat options: a name that matches a chat
+            // profile (Thinking and all) mustn't lend it any. Its controls are
+            // the picker's `image` block.
+            // Local and cloud image models alike, from the picker's cached list
+            // (built once if it isn't yet) rather than a model-store scan.
+            var pickerItems = await MainActor.run { ModelPickerItemCache.shared.items }
+            if pickerItems.isEmpty { pickerItems = await ModelPickerItemCache.shared.buildModelPickerItems() }
+            let isImageModel = pickerItems.contains { item in
+                item.id == request.model && (item.source.isImageGeneration || item.mediaModel?.kind == .image)
+            }
+            if isImageModel {
+                let body =
+                    isWrite
+                    ? #"{"error":"unknown_option"}"#
+                    : ((try? JSONEncoder.osaurusCanonical().encode(
+                        ModelOptionsSnapshot(model: request.model, thinking: nil, options: [])
+                    )).map { String(decoding: $0, as: UTF8.self) } ?? #"{"error":"encoding_failed"}"#)
+                hop {
+                    var headers = [("Content-Type", "application/json; charset=utf-8")]
+                    headers.append(contentsOf: cors)
+                    self.sendResponse(
+                        context: ctx.value,
+                        version: head.version,
+                        status: isWrite ? .notFound : .ok,
+                        headers: headers,
+                        body: body
+                    )
+                }
+                return
+            }
             // Off-main bundle read, so local models report their real
             // thinking / effort contract instead of the cold-cache miss.
             _ = await LocalReasoningCapability.resolveForDispatch(modelId: request.model)
@@ -7852,13 +8071,18 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     /// the encrypted envelope) but rate-limited like the pairing endpoints.
     /// Signs the transcript with the target agent's key so the client can
     /// verify it is talking to the agent address it pinned at pairing.
+    /// Handshakes get their own budget: a phone opens one per agent and route
+    /// and again every hour, which must neither lock out its own pairing nor
+    /// be locked out by someone spamming pairing codes.
+    static let secureSessionRateLimiter = PairingRateLimiter(window: 60, maxPerWindow: 30, denialCooldown: 10)
+
     private func handleSecureSessionEndpoint(
         head: HTTPRequestHead,
         context: ChannelHandlerContext,
         startTime: Date,
         userAgent: String?
     ) {
-        guard PairingRateLimiter.shared.allow(ip: remoteIP(context)) else {
+        guard Self.secureSessionRateLimiter.allow(ip: remoteIP(context)) else {
             sendPairingRateLimited(
                 head: head,
                 context: context,
@@ -8071,7 +8295,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
         guard let inner = try? JSONDecoder().decode(SecureChannel.InnerRequest.self, from: plaintext),
             inner.path.hasPrefix("/"),
-            !inner.path.hasPrefix("/secure/")
+            // On the path as routed: `/v1/secure/call` normalises to
+            // `/secure/call`, so checking the raw path alone lets one nest.
+            !Self.isSecureChannelPath(normalize(extractPath(from: inner.path)))
         else {
             reject(status: .badRequest, code: "secure_malformed", message: "Malformed inner request")
             return nil
@@ -8152,6 +8378,38 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             startTime: startTime,
             userAgent: userAgent
         )
+    }
+
+    /// Routes a remote owner key may only reach through the Secure Channel,
+    /// whatever the method: what runs things (dispatched tasks) or reads what
+    /// is private (chats, prompts, memory, credit). The OpenAI-style media and
+    /// model routes (`/chat/completions`, `/models`, `/images/*`, `/videos/*`)
+    /// stay plaintext for third-party SDKs, and so does `/mcp/*`: MCP hosts
+    /// (Claude Desktop and the like) can't speak the Secure Channel, and their
+    /// tools are confined by the external deny list and key scope instead.
+    static let ownerChannelRoutes = [
+        "/agents", "/models/picker", "/models/favorites", "/models/options", "/privacy", "/config/approvals",
+        "/computer-use", "/secrets", "/approvals", "/workspaces", "/workspace-agents", "/projects", "/sessions",
+        "/runs", "/artifacts", "/pair/unpair", "/images/jobs", "/tasks", "/memory/ingest",
+        "/credits/balance",
+    ]
+
+    static func isSecureChannelPath(_ path: String) -> Bool {
+        path == "/secure" || path.hasPrefix("/secure/")
+    }
+
+    /// `GET /agents` stays readable in plaintext for one release: phones up
+    /// to 1.0(5) with nothing pinned fetch it that way to learn the address
+    /// they then open the channel with, and would otherwise be stuck until
+    /// they pair again. It carries no prompts or secrets; current phones
+    /// fetch it inside the channel and never pin from a plaintext copy.
+    /// Goes with v1 pairing (MOBILE_PROTOCOL.md §11.3).
+    static func legacyPlaintextRead(method: HTTPMethod, path: String) -> Bool {
+        method == .GET && path == "/agents"
+    }
+
+    static func isOwnerChannelRoute(_ path: String) -> Bool {
+        ownerChannelRoutes.contains { path == $0 || path.hasPrefix($0 + "/") }
     }
 
     /// Hard-require gate for `/agents/{id}/run` and `/agents/{id}/dispatch`:
@@ -9329,9 +9587,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 relay_url: relayOn ? agent.agentAddress.map(RelayTunnelManager.publicURL(forAddress:)) : nil
                 ,
                 custom_avatar: agent.customAvatarURL != nil ? true : nil,
-                system_prompt: ownerCaller ? agent.systemPrompt : nil
+                system_prompt: nil
             )
             if ownerCaller {
+                // As the Mac resolves it: the built-in Orchestrator keeps its
+                // prompt in its own store (`default-agent.json`), not on the
+                // agent record, which reads empty for it.
+                let agentId = agent.id
+                item.system_prompt = await MainActor.run { AgentManager.shared.effectiveSystemPrompt(for: agentId) }
                 item.settings = await MainActor.run { PhoneAgentEditing.settings(for: agent) }
             }
             let json =
@@ -10998,6 +11261,48 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     /// GET /runs/{id}/events?after=N — rejoin a phone run: the frames after
     /// the first N, then the rest live. Owner-only.
+    /// GET /images/jobs/{id}/events?after=N — rejoin a phone's image job
+    /// (docs/MOBILE_PROTOCOL.md §12.5): the events after the first N, the
+    /// newest preview, then the rest live. Owner-only; gated to the Secure
+    /// Channel with the other owner routes.
+    private func handleImageJobEventsEndpoint(
+        head: HTTPRequestHead,
+        context: ChannelHandlerContext,
+        path: String,
+        startTime: Date,
+        userAgent: String?
+    ) {
+        guard callerOwnsThisMac(context) else {
+            sendOwnerOnlyForbidden(head: head, context: context, path: path, startTime: startTime, userAgent: userAgent)
+            return
+        }
+        let components = path.split(separator: "/")
+        guard components.count == 4, components[3] == "events",
+            let job = DetachedPhoneRuns.images.run(id: String(components[2]))
+        else {
+            sendRunJSON(
+                .notFound,
+                #"{"error":"job_not_found"}"#,
+                head: head,
+                context: context,
+                path: path,
+                startTime: startTime,
+                userAgent: userAgent
+            )
+            return
+        }
+        let after = Self.queryItems(from: head.uri)["after"].flatMap { Int($0) } ?? 0
+        streamDetachedRun(
+            job,
+            after: after,
+            head: head,
+            context: context,
+            path: path,
+            startTime: startTime,
+            userAgent: userAgent
+        )
+    }
+
     private func handleRunEventsEndpoint(
         head: HTTPRequestHead,
         context: ChannelHandlerContext,
@@ -12258,9 +12563,33 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 )
                 return
             }
+            // Into the Mac chat the phone named, as local images are; the same
+            // owner-and-Secure-Channel rule applies.
+            let remoteSession = phoneImageSession(req.osaurus_session_id, context: context)
+            if remoteSession != nil,
+                requiresOwnerChannel(
+                    head: head,
+                    context: context,
+                    path: "/images/generations",
+                    startTime: startTime,
+                    userAgent: userAgent
+                )
+            {
+                return
+            }
+            // A billed job above all must not run twice for one dropped phone.
+            let phoneJob = phoneImageJob(req.osaurus_job_id, streaming: req.stream ?? false, context: context)
+            if case .follow(let job) = phoneJob {
+                streamDetachedRun(
+                    job, after: 0, head: head, context: context, path: "/images/generations",
+                    startTime: startTime, userAgent: userAgent)
+                return
+            }
             handleRemoteImageGeneration(
                 request: req,
                 target: selectedTarget,
+                sessionId: remoteSession,
+                detached: phoneJob.started,
                 head: head,
                 context: context,
                 startTime: startTime,
@@ -12277,7 +12606,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         {
             return
         }
-        let jobID = Self.shortId(prefix: "img")
+        let phoneJob = phoneImageJob(req.osaurus_job_id, streaming: req.stream ?? false, context: context)
+        if case .follow(let job) = phoneJob {
+            streamDetachedRun(
+                job, after: 0, head: head, context: context, path: "/images/generations",
+                startTime: startTime, userAgent: userAgent)
+            return
+        }
+        let jobID = phoneJob.started?.id ?? Self.shortId(prefix: "img")
         runImageJob(
             head: head,
             context: context,
@@ -12289,8 +12625,34 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             responseFormat: req.response_format ?? "url",
             jobID: jobID,
             onCompleted: Self.imageSessionAppender(
-                continuedSession, prompt: req.prompt, sourceImages: [], model: modelId)
+                continuedSession, prompt: req.prompt, sourceImages: [], model: modelId),
+            detached: phoneJob.started
         ) { await ImageGenerationService.shared.generateHTTP(req, modelID: modelId, jobID: jobID) }
+    }
+
+    /// A job the owner's phone named with `osaurus_job_id` over the Secure
+    /// Channel (docs/MOBILE_PROTOCOL.md §12.5): it outlives the connection, and
+    /// the phone rejoins it at `GET /images/jobs/{id}/events`. `follow` is the
+    /// same id while that job is live: the phone sent the request again (its
+    /// other route, having heard nothing), so it follows rather than start a
+    /// second, possibly billed, job.
+    private enum PhoneImageJob {
+        case none
+        case new(DetachedPhoneRun)
+        case follow(DetachedPhoneRun)
+
+        var started: DetachedPhoneRun? {
+            if case .new(let job) = self { return job }
+            return nil
+        }
+    }
+
+    private func phoneImageJob(_ id: String?, streaming: Bool, context: ChannelHandlerContext) -> PhoneImageJob {
+        guard streaming, let id, DetachedPhoneRuns.isValidId(id), callerOwnsThisMac(context),
+            stateRef.value.isSecureChannel
+        else { return .none }
+        let (job, isNew) = DetachedPhoneRuns.images.begin(id: id, followFinished: true)
+        return isNew ? .new(job) : .follow(job)
     }
 
     /// The Mac chat an owner's phone named with `osaurus_session_id` on an
@@ -12328,6 +12690,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     private func handleRemoteImageGeneration(
         request req: ImageGenerationRequestDTO,
         target: MediaModelTarget,
+        sessionId: UUID? = nil,
+        detached: DetachedPhoneRun? = nil,
         head: HTTPRequestHead,
         context: ChannelHandlerContext,
         startTime: Date,
@@ -12358,12 +12722,85 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let loop = context.eventLoop
         let ctx = NIOLoopBound(context, eventLoop: loop)
         let hop = Self.makeHop(channel: context.channel, loop: loop)
+        // Into the Mac chat the phone named, once the images are in.
+        let appendToChat: @Sendable ([URL]) -> Void = { urls in
+            guard let sessionId else { return }
+            let prompt = req.prompt
+            let model = target.modelID
+            Task { @MainActor in
+                await RemoteSessionContinuation.appendImageExchange(
+                    prompt: prompt,
+                    sourceImages: [],
+                    generated: urls,
+                    to: sessionId,
+                    model: model
+                )
+            }
+        }
+        // A provider call doesn't stream, but a client that asked for SSE
+        // (the phone) still gets its answer as SSE: a `completed` or `error`
+        // event once the provider is done.
+        if req.stream == true {
+            let writer = NIOLoopBound(SSEResponseWriter(), eventLoop: loop)
+            writer.value.recorder = detached
+            // Detached: keeps going, and recording, once the phone is gone.
+            let write: (@escaping @Sendable () -> Void) -> Void =
+                detached == nil ? hop : { block in loop.inEventLoop ? block() : loop.execute { block() } }
+            write { writer.value.writeHeaders(ctx.value, extraHeaders: cors) }
+            func emit(_ event: ImageStreamEventDTO) {
+                let json =
+                    (try? JSONEncoder.osaurusCanonical().encode(event))
+                    .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                write { writer.value.writeRawJSONData(json, context: ctx.value) }
+            }
+            let jobID = detached?.id ?? Self.shortId(prefix: "img")
+            let task = runRequestTask(priority: .userInitiated, outlivesConnection: detached != nil) {
+                // However the task leaves, the stream ends and a detached job
+                // finishes; queued behind the events, as the same hop.
+                defer { write { writer.value.writeEnd(ctx.value) } }
+                var status = 200
+                do {
+                    let generated = try await MediaGenerationCoordinator.shared.generateImage(request)
+                    guard !generated.isEmpty else { throw MediaGenerationError.invalidResponse }
+                    appendToChat(generated.map(\.url))
+                    let results = try generated.map { media in
+                        ImageResultDTO(
+                            url: nil,
+                            b64_json: try Data(contentsOf: media.url).base64EncodedString(),
+                            seed: req.seed ?? 0
+                        )
+                    }
+                    emit(ImageStreamEventDTO(type: "completed", job_id: jobID, images: results))
+                } catch where Task.isCancelled {
+                    // Stopped (`/images/cancel`): said as the local path says it.
+                    status = 499
+                    emit(ImageStreamEventDTO(type: "cancelled", job_id: jobID))
+                } catch {
+                    status = Int(Self.mediaErrorStatus(error).code)
+                    emit(ImageStreamEventDTO(type: "error", job_id: jobID, message: error.localizedDescription))
+                }
+                self.logRequest(
+                    method: "POST",
+                    path: "/images/generations",
+                    userAgent: userAgent,
+                    requestBody: requestBody,
+                    responseBody: "[stream]",
+                    responseStatus: status,
+                    startTime: startTime,
+                    model: target.modelID
+                )
+            }
+            // Stop (`/images/cancel` with the phone's job id) ends the wait.
+            detached?.onStop { task.cancel() }
+            return
+        }
         runRequestTask(priority: .userInitiated) {
             do {
                 let generated = try await MediaGenerationCoordinator.shared.generateImage(request)
                 guard !generated.isEmpty else {
                     throw MediaGenerationError.invalidResponse
                 }
+                appendToChat(generated.map(\.url))
                 let results = try generated.map { media -> ImageResultDTO in
                     if req.response_format == "b64_json" {
                         let bytes = try Data(contentsOf: media.url)
@@ -12872,7 +13309,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         {
             return
         }
-        let jobID = Self.shortId(prefix: "img")
+        let phoneJob = phoneImageJob(req.osaurus_job_id, streaming: req.stream ?? false, context: context)
+        if case .follow(let job) = phoneJob {
+            streamDetachedRun(
+                job, after: 0, head: head, context: context, path: "/images/edits",
+                startTime: startTime, userAgent: userAgent)
+            return
+        }
+        let jobID = phoneJob.started?.id ?? Self.shortId(prefix: "img")
         runImageJob(
             head: head,
             context: context,
@@ -12890,7 +13334,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 aspect: nil, resolution: nil,
                 extra: ["source_images": String(rawSources.count), "job_id": jobID]),
             onCompleted: Self.imageSessionAppender(
-                continuedSession, prompt: req.prompt, sourceImages: sources, model: editModelId)
+                continuedSession, prompt: req.prompt, sourceImages: sources, model: editModelId),
+            detached: phoneJob.started
         ) {
             await ImageGenerationService.shared.editHTTP(req, modelID: editModelId,
                 decodedSources: decodedSources, jobID: jobID)
@@ -12970,9 +13415,17 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let loop = context.eventLoop
         let ctx = NIOLoopBound(context, eventLoop: loop)
         let hop = Self.makeHop(channel: context.channel, loop: loop)
+        // A phone's job is the owner's: only the owner, through the Secure
+        // Channel as when it started it, may stop it.
+        let phoneJob = DetachedPhoneRuns.images.run(id: req.job_id)
+        let mayStop = phoneJob == nil || (callerOwnsThisMac(context) && stateRef.value.isSecureChannel)
         let logSelf = self
         runRequestTask(priority: .userInitiated) {
-            await ImageGenerationService.shared.cancel(jobID: req.job_id)
+            if mayStop {
+                await ImageGenerationService.shared.cancel(jobID: req.job_id)
+                // A cloud job stops through its own handler.
+                phoneJob?.stop()
+            }
             let json = #"{"type":"cancelled","job_id":"\#(Self.jsonEscape(req.job_id))"}"#
             hop {
                 var headers = [("Content-Type", "application/json; charset=utf-8")]
@@ -13006,6 +13459,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         model: String? = nil,
         activityDetails: [String: String] = [:],
         onCompleted: (@Sendable ([GeneratedImage]) async -> Void)? = nil,
+        detached: DetachedPhoneRun? = nil,
         build: @escaping @Sendable () async -> ImageHTTPPreparedJob
     ) {
         let cors = stateRef.value.corsHeaders
@@ -13019,14 +13473,21 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             // NIOLoopBound so it can cross into the `@Sendable` hop closures
             // (same pattern as the chat SSE path).
             let writer = NIOLoopBound(SSEResponseWriter(), eventLoop: loop)
-            hop { writer.value.writeHeaders(ctx.value, extraHeaders: cors) }
+            writer.value.recorder = detached
+            // A detached job keeps writing once the phone is gone: its frames
+            // go to the recorder, and the writes no-op on the dead channel.
+            let write: (@escaping @Sendable () -> Void) -> Void =
+                detached == nil ? hop : { block in loop.inEventLoop ? block() : loop.execute { block() } }
+            write { writer.value.writeHeaders(ctx.value, extraHeaders: cors) }
             func emit(_ event: ImageStreamEventDTO) {
                 let json =
                     (try? JSONEncoder.osaurusCanonical().encode(event))
                     .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
-                hop { writer.value.writeRawJSONData(json, context: ctx.value) }
+                // Previews are whole PNGs: replay keeps only the newest.
+                let transient = event.type == "preview"
+                write { writer.value.writeRawJSONData(json, context: ctx.value, transient: transient) }
             }
-            runRequestTask(priority: .userInitiated) {
+            runRequestTask(priority: .userInitiated, outlivesConnection: detached != nil) {
                 emit(ImageStreamEventDTO(type: "queued", job_id: jobID))
                 let prepared = await build()
                 let stream = prepared.stream
@@ -13069,7 +13530,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         )
                     )
                 }
-                hop { writer.value.writeEnd(ctx.value) }
+                write { writer.value.writeEnd(ctx.value) }
                 logSelf.logRequest(
                     method: "POST",
                     path: path,
@@ -18389,14 +18850,23 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         errorMessage: String? = nil,
         details: [String: String]? = nil
     ) {
+        // What travelled sealed end to end stays out of the log: a Secure
+        // Channel call keeps only the size of its bodies.
+        // Off the event loop (a request's task), its own snapshot: the
+        // connection's flag may belong to a later request by now.
+        let sealed = HTTPCallerContext.current?.isSecureChannel ?? _isSecureChannel.value
+        func redacted(_ body: String?) -> String? {
+            guard sealed, let body else { return body }
+            return "[sealed, \(body.utf8.count) bytes]"
+        }
         let durationMs = Date().timeIntervalSince(startTime) * 1000
         InsightsService.logAsync(
             method: method,
             path: path,
             clientIP: _clientIP.value,
             userAgent: userAgent,
-            requestBody: requestBody,
-            responseBody: responseBody,
+            requestBody: redacted(requestBody),
+            responseBody: redacted(responseBody),
             responseStatus: responseStatus,
             durationMs: durationMs,
             model: model,

@@ -850,6 +850,45 @@ finds the pin, and should tell the user to update Osaurus on the Mac: unlike
 an unpaired phone, it never learns identities from Bonjour, so joining the
 Mac's network does not help.
 
+
+#### v2: SPAKE2 (current)
+
+v1 sends the code in the clear and seals to whatever key arrives with it, so
+an active LAN attacker can swap in its own key (§11.5). v2 never sends the
+code. It runs SPAKE2 (RFC 9382) over secp256k1, keyed by the code, in two
+steps; both apps implement it in `PairingSPAKE2.swift`.
+
+```
+POST /pair/code            (unauthenticated, LAN only, rate-limited per IP)
+{"v":2,"deviceId":"…","deviceName":"My iPhone","share":"<base64url pA>",
+ "isSimulator":true}   // optional
+
+→ 200 {"v":2,"exchange":"<id>","share":"<base64url pB>","confirm":"<base64url cB>"}
+
+POST /pair/confirm         (unauthenticated, LAN only, rate-limited per IP)
+{"v":2,"exchange":"<id>","confirm":"<base64url cA>"}
+
+→ 200 {"v":2,"sealed":"<base64url ChaCha20-Poly1305 combined box>"}
+  sealed under the session key, AAD = utf8("osaurus-pair-v2:payload:<deviceId>");
+  plaintext = the v1 payload above
+```
+
+- Points are compressed secp256k1. M and N hash the labels `M` / `N` to an
+  x coordinate on the curve (even y); w hashes the code to a scalar.
+  pA = x·G + w·M, pB = y·G + w·N, K = x·y·G.
+- TT is the length-prefixed (8-byte little-endian) concatenation of
+  `osaurus-pair-v2`, the phone identity (length-prefixed deviceId and
+  deviceName), an empty Mac identity, pA, pB, K and w. HKDF-SHA256 over
+  SHA-256(TT) gives the session key and the two confirmation keys; cA and cB
+  are HMAC-SHA256 of TT under them.
+- The phone checks cB before it sends cA. A mismatch means a wrong code (or
+  someone in the middle), and the phone says the code was wrong.
+- Every exchange the Mac answers spends one of the code's 5 attempts,
+  whether or not the code was right: the Mac can't tell until step two. The
+  Mac records the phone and revokes the previous one only after a matching cA.
+- A v2 phone against a Mac without v2 gets `400`, and tells the user to
+  update Osaurus on the Mac. v1 stays accepted for one release so phones
+  paired by older builds can pair again, then goes.
 ### 11.4 Lifecycle
 
 - Keys last 90 days; re-pair to renew. Unpair on the Mac revokes the key
@@ -864,14 +903,19 @@ Mac's network does not help.
 
 ### 11.5 Security notes
 
-The code travels in cleartext on the LAN. A passive observer learns a
-single-use code that is useless after redemption, and the key itself is
-sealed to the phone's ephemeral key. An **active** LAN attacker who
-intercepts the code inside its 5-minute window can redeem it first; the Mac
-then shows the attacker's device name under "Paired iPhone", and the real
-phone's redemption fails. The residual risk is accepted for v1 (LAN-only,
-short-lived, user-initiated); a PAKE (e.g. SPAKE2 over the code) would remove
-it.
+**v1** sends the code in cleartext and seals the key to whatever `encPub`
+arrives with it. An **active** LAN attacker inside the 5-minute window can
+replace `encPub` with its own, open the sealed payload, take the access key,
+and hand the phone a roster of its own addresses to pin. Every later Secure
+Channel session then terminates at the attacker, and the Mac shows the real
+phone's name. This is a silent, lasting man in the middle, not just a race to
+redeem first.
+
+**v2** (SPAKE2) closes this. The code never travels, and a share swapped in
+transit yields different keys, so confirmation fails and nothing is handed
+over. An attacker gets one online guess per answered exchange (5 per code),
+and nothing to test guesses against offline. The device id and name are bound
+into the transcript, so they can't be relabelled either.
 
 ### 11.6 Reaching the Mac away from the LAN
 
@@ -994,6 +1038,75 @@ The stream is SSE, one JSON object per `data:` line, `type` being `queued`,
 PNG data URL), `completed` (`images[].b64_json`), `error` (`message`) or
 `cancelled`; every event carries `job_id`, which `POST /images/cancel`
 (`{"job_id":"…"}`) takes.
+
+**Controls.** Each `kind: "image"` entry in `/models/picker` carries an
+`image` block: the same `capabilities`, `defaults` and `limits` as
+`GET /images/models`, plus `max_guidance`, the CFG ceiling the Mac's
+composer clamps to.
+
+```json
+"image":{"capabilities":{"text_to_image":true,"image_edit":true,"negative_prompt":true,
+          "edit_negative_prompt":false,"edit_strength":true,…},
+         "defaults":{"steps":20,"guidance":3.5},
+         "limits":{"min_steps":1,"max_steps":50,"size_multiple":16,"max_pixels":1048576,
+                   "supported_sizes":["512x512","768x768","1024x1024"]},
+         "max_guidance":20}
+```
+
+The phone shows the composer's controls from it and adds what the user
+set to the request: `size` (`"WxH"` from `supported_sizes`), `steps`,
+`guidance`, `seed`, `negative_prompt` (when `negative_prompt`, or
+`edit_negative_prompt` for edits, is true) and, on `/images/edits` only,
+`strength` 0–1 (when `edit_strength`). A field left out takes the model's
+own default; Qwen-Image 2.1 relies on that, as its unset size follows the
+source image.
+
+**Rejoining.** An image can take minutes, longer than iOS keeps a
+backgrounded app's connection. Over the Secure Channel, the owner's phone
+names its job with `osaurus_job_id` (its own UUID, as `osaurus_run_id` for
+runs, §6.4) on a streaming `/images/generations` or `/images/edits`. That
+job then outlives the connection, and its id is the `job_id` its events
+carry and `/images/cancel` takes:
+
+- `GET /images/jobs/{id}/events?after=N` replays the events after the first
+  `N`, then follows the rest live, ending with `data: [DONE]`. `preview`
+  events are not counted in `N` and are not replayed, apart from the newest,
+  which a rejoin gets after the replay while the job is still running. A
+  client counts every other event it receives.
+- `404 job_not_found` means no such job; `410 run_gone` means the job is too
+  old (kept 30 minutes after it ends) or its events were too large to keep.
+  A phone in a Mac chat then reloads the chat, which holds the image.
+- The same `osaurus_job_id` sent again while the job is live (the phone's
+  other route, having heard nothing) follows that job from the start rather
+  than start a second one. For a cloud model, that is a second bill avoided.
+- Owner-only, Secure Channel only (426 otherwise), like the other owner
+  routes.
+
+**Cloud image models.** Available cloud image models (a remote provider's
+catalog, or Osaurus Cloud) are listed too, `kind: "image"` with
+`edits: false` and a `cloud` block in place of `image`:
+
+```json
+"cloud":{"target":{"backend":"osaurus_cloud","model":"<catalog id>"},
+         "aspect_ratios":["1:1","16:9"],"default_aspect_ratio":"1:1",
+         "resolutions":[],"qualities":["standard","high"],"default_quality":"standard",
+         "default_steps":null,"max_steps":null,"prompt_character_limit":4000,
+         "formats":["png","jpeg","webp"],"max_count":4,
+         "min_price_usd":0.04,"price_label":"From … credits","privacy":"…"}
+```
+
+They bill. The phone confirms each generation, showing `price_label`, and
+only then sends `target` (with `provider_id` for `remote_provider`),
+`allow_remote_media_spend: true`, and what the user picked: `aspect_ratio`,
+`resolution`, `quality`, `n` (1–`max_count`), `output_format`, and `size`,
+`steps`, `guidance`, `seed`, `negative_prompt` where the catalog leaves room
+for them (`size` only when it lists no aspect ratios or resolutions). Without
+the flag the Mac answers `403`. A provider call doesn't stream: asked for
+SSE, the Mac sends one `completed` (or `error`) event when it is done, with
+no `queued`, so there is no job to cancel. `osaurus_session_id` works as for
+local models. Edits aren't supported yet. Provider failures arrive as the
+`error` event's `message` (no credentials, insufficient balance, content
+policy).
 
 With `osaurus_session_id` naming a chat the phone may continue (§14.5), the
 prompt (with its source images) and the reply are appended to it once the

@@ -54,6 +54,58 @@ struct DetachedPhoneRunsTests {
         #expect(received.ended)
     }
 
+    /// An image job's previews (§12.5): live followers get each one, a
+    /// rejoin only the newest, and none of them count towards `after`.
+    @Test func previewsAreTransient() {
+        let job = DetachedPhoneRun(id: "img1")
+        let live = Received()
+        _ = job.follow(after: 0, live.follower)
+        job.record("data: queued\n\n")
+        job.recordTransient("data: preview1\n\n")
+        job.record("data: step\n\n")
+        job.recordTransient("data: preview2\n\n")
+        #expect(live.frames.count == 4)
+        #expect(job.frameCount == 2)
+
+        let rejoined = Received()
+        #expect(job.follow(after: 1, rejoined.follower) != .gone)
+        #expect(rejoined.frames == ["data: step\n\n", "data: preview2\n\n"])
+
+        job.finish()
+        let late = Received()
+        _ = job.follow(after: 2, late.follower)
+        #expect(late.frames.isEmpty, "a finished job's preview is no use")
+        #expect(late.ended)
+    }
+
+    /// The same job id after its job ended replays that job: a second run
+    /// of a cloud model would bill twice for one image.
+    @Test func aFinishedImageJobIsFollowedNotRunAgain() {
+        let store = DetachedPhoneRuns()
+        let (job, isNew) = store.begin(id: "img-done", followFinished: true)
+        #expect(isNew)
+        job.record("data: completed\n\n")
+        job.finish()
+        let (again, isNewAgain) = store.begin(id: "img-done", followFinished: true)
+        #expect(!isNewAgain)
+        #expect(again === job)
+        // Runs keep starting afresh once finished.
+        _ = store.begin(id: "run-done").run.finish()
+        #expect(store.begin(id: "run-done").isNew)
+    }
+
+    @Test func imageJobsAndRunsAreKeptApart() {
+        _ = DetachedPhoneRuns.images.begin(id: "shared-id-test")
+        #expect(DetachedPhoneRuns.shared.run(id: "shared-id-test") == nil)
+        #expect(DetachedPhoneRuns.images.run(id: "shared-id-test") != nil)
+    }
+
+    @Test func theImageRequestCarriesItsJobId() throws {
+        let body = #"{"model":"m","prompt":"p","stream":true,"osaurus_job_id":"job-1"}"#
+        let req = try JSONDecoder().decode(ImageGenerationRequestDTO.self, from: Data(body.utf8))
+        #expect(req.osaurus_job_id == "job-1")
+    }
+
     @Test func anIndexPastTheEndIsGone() {
         let run = DetachedPhoneRun(id: "r3")
         run.record("data: a\n\n")

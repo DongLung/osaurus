@@ -295,13 +295,51 @@ struct SecureChannelE2ETests {
         }
     }
 
-    /// Owner reads stay open over plaintext.
-    @Test func plaintextOwnerRead_relayOrigin_isNot426() async throws {
+    /// Owner reads are as private as the writes: chat history, live runs,
+    /// review queues and secret prompts are 426'd over plaintext too.
+    @Test func plaintextOwnerReads_relayOrigin_return426() async throws {
         let server = try await startSecureTestServer(trustLoopback: true)
         defer { Task { await server.shutdown() } }
-        let request = plaintextOwnerRequest(server: server, method: "GET", path: "/sessions")
+        let id = UUID().uuidString
+        let reads = [
+            "/sessions", "/sessions/\(id)", "/runs/\(id)/events", "/privacy/reviews", "/secrets/prompts",
+            "/approvals", "/agents/\(id)", "/models/picker",
+        ]
+        for path in reads {
+            let request = plaintextOwnerRequest(server: server, method: "GET", path: path)
+            let (_, resp) = try await URLSession.shared.data(for: request)
+            #expect((resp as? HTTPURLResponse)?.statusCode == 426, "GET \(path)")
+        }
+    }
+
+    /// For one release the plain agent list stays readable, for phones up to
+    /// 1.0(5) that learn their pin from it.
+    @Test func plaintextAgentList_relayOrigin_isNot426ForNow() async throws {
+        let server = try await startSecureTestServer(trustLoopback: true)
+        defer { Task { await server.shutdown() } }
+        let request = plaintextOwnerRequest(server: server, method: "GET", path: "/agents")
         let (_, resp) = try await URLSession.shared.data(for: request)
         #expect((resp as? HTTPURLResponse)?.statusCode != 426)
+    }
+
+    /// OpenAI-style routes stay plaintext for third-party SDKs.
+    @Test func plaintextModels_relayOrigin_isNot426() async throws {
+        let server = try await startSecureTestServer(trustLoopback: true)
+        defer { Task { await server.shutdown() } }
+        let request = plaintextOwnerRequest(server: server, method: "GET", path: "/models")
+        let (_, resp) = try await URLSession.shared.data(for: request)
+        #expect((resp as? HTTPURLResponse)?.statusCode != 426)
+    }
+
+    @Test func ownerChannelRoutes_matchWholeSegments() {
+        #expect(HTTPHandler.isOwnerChannelRoute("/sessions"))
+        #expect(HTTPHandler.isOwnerChannelRoute("/agents/abc/run"))
+        #expect(!HTTPHandler.isOwnerChannelRoute("/agentsx"))
+        #expect(!HTTPHandler.isOwnerChannelRoute("/models"))
+        #expect(HTTPHandler.isOwnerChannelRoute("/tasks/abc"))
+        #expect(!HTTPHandler.isOwnerChannelRoute("/mcp/call"))
+        #expect(!HTTPHandler.isOwnerChannelRoute("/mcp/tools"))
+        #expect(!HTTPHandler.isOwnerChannelRoute("/chat/completions"))
     }
 
     /// Loopback (the Mac's own CLI) still edits in plaintext.
@@ -721,18 +759,21 @@ struct SecureChannelE2ETests {
         defer { Task { await server.shutdown() } }
         let session = try establishSession()
 
-        // No nesting: an inner request pointing back at /secure/* is malformed.
-        let inner = SecureChannel.InnerRequest(
-            method: "POST",
-            path: "/secure/call",
-            authorization: nil
-        )
-        let (call, _) = try session.sealCall(innerRequest: JSONEncoder().encode(inner))
-        let request = try secureCallRequest(server: server, call: call)
+        // No nesting: an inner request pointing back at /secure/* is
+        // malformed, under any prefix that normalises to it.
+        for path in ["/secure/call", "/v1/secure/call", "/api/secure/session", "/v1/api/secure/call?x=1"] {
+            let inner = SecureChannel.InnerRequest(
+                method: "POST",
+                path: path,
+                authorization: nil
+            )
+            let (call, _) = try session.sealCall(innerRequest: JSONEncoder().encode(inner))
+            let request = try secureCallRequest(server: server, call: call)
 
-        let (data, resp) = try await URLSession.shared.data(for: request)
-        #expect((resp as? HTTPURLResponse)?.statusCode == 400)
-        #expect(String(decoding: data, as: UTF8.self).contains("secure_malformed"))
+            let (data, resp) = try await URLSession.shared.data(for: request)
+            #expect((resp as? HTTPURLResponse)?.statusCode == 400, "\(path)")
+            #expect(String(decoding: data, as: UTF8.self).contains("secure_malformed"), "\(path)")
+        }
     }
 }
 
