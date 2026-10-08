@@ -808,7 +808,7 @@ struct RuntimePolicySourceTests {
         // and both xcworkspace Package.resolved files. Miss one and a release
         // surface resolves a revision nobody proved. OsaurusEvals resolves
         // this manifest transitively and its local Package.resolved is ignored.
-        let expectedRuntimeHardenedRevision = "648f328ca1c97afc3f51af5da91665fef632c6a5"
+        let expectedRuntimeHardenedRevision = "a468573fbe5b2c166d8d1dabea78c205c41e6716"
         let manifestRevision = try Self.vmlxPinRevision(in: manifest)
         let coreResolvedRevision = try Self.vmlxPinRevision(in: coreResolved)
         let workspaceRevision = try Self.vmlxPinRevision(in: workspaceResolved)
@@ -2757,11 +2757,11 @@ struct RuntimePolicySourceTests {
         )
         let mtpFastPath = try #require(
             runtime.range(
-                of: "ModelFamilyNames.isMiMoOrN2JANGRuntimeFamily(modelName)",
-                range: mtpStart.lowerBound ..< mtpJSONRead.lowerBound
+                of: "ModelFamilyNames.isMiMoOrN2JANGRuntimeFamily(modelName, configData: configData)",
+                range: mtpJSONRead.upperBound ..< runtime.endIndex
             )
         )
-        #expect(mtpFastPath.lowerBound < mtpJSONRead.lowerBound)
+        #expect(mtpJSONRead.lowerBound < mtpFastPath.lowerBound)
     }
 
     @Test("MTP bundles auto-resolve vmlx tuning into load and generation")
@@ -3933,7 +3933,7 @@ struct RuntimePolicySourceTests {
         #expect(picker.contains("manual=blocked"))
         #expect(
             picker.contains(
-                "nativeMTPManuallyBlockedModels.contains(identity) ? \"off\" : nativeMTPSelection"
+                "nativeMTPManuallyBlockedModels.contains(identity) ? \"off\" : shown"
             ),
             "A globally saved Adaptive request must render as Off for a bundle whose runtime blocks native MTP."
         )

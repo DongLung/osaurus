@@ -65,13 +65,17 @@ struct ModelOptionsSnapshot: Encodable, Equatable {
     /// refuses MTP.
     struct NativeMTP: Equatable, Sendable {
         let blocked: Bool
+        /// The bundle is in the family the default turns on (Qwen3.8 Flash-Next): under
+        /// `mtp.mode == .familyDefault` it runs Adaptive without a user choice.
+        var familyDefaultOn: Bool = false
 
         /// File-only bundle inspection; run it off the main thread.
         static func inspect(model: String) -> NativeMTP? {
             guard let status = ModelRuntime.inspectLoadingModelMTP(name: model),
-                status.bundleHasMTP, status.isTargetMTPFamily
+                status.speculationAvailable
             else { return nil }
-            return NativeMTP(blocked: status.isBlocked)
+            return NativeMTP(
+                blocked: status.speculationBlocked, familyDefaultOn: status.familyDefaultOn)
         }
     }
 
@@ -169,10 +173,12 @@ struct ModelOptionsSnapshot: Encodable, Equatable {
         let off = Segment(id: "off", label: L("Off (AR)"), description: nil)
         let adaptive = Segment(id: "auto", label: L("On (Adaptive)"), description: nil)
         let mode = ServerController.runtimeSettingsForConfigureTool().settings.mtp.mode
-        let selected = nativeMTP.blocked || mode == .off ? "off" : "auto"
+        // `.familyDefault` shows what the engine will actually run for THIS bundle.
+        let effectiveOn = mode == .familyDefault ? nativeMTP.familyDefaultOn : mode != .off
+        let selected = nativeMTP.blocked || !effectiveOn ? "off" : "auto"
         return Option(
             id: nativeMTPOptionId,
-            label: L("Native MTP"),
+            label: L("Speculative Decoding"),
             icon: "hare",
             // The phone shows the choice alone, without the composer's copy.
             help: nil,
@@ -180,25 +186,28 @@ struct ModelOptionsSnapshot: Encodable, Equatable {
             segments: nativeMTP.blocked ? [off] : [off, adaptive],
             selected: selected,
             on: nil,
-            // Off is the default, as the composer shows it.
-            explicit: selected != "off"
+            // Only an explicit Off / On choice is an override; the family default is not.
+            explicit: mode != .familyDefault
         )
     }
 
     /// Stores a Native MTP choice through the composer's and Settings' one
-    /// route. A nil value resets to the default, Off.
+    /// route. A nil value restores the bundle-aware default.
     @MainActor
     static func applyNativeMTP(_ value: ModelOptionValue?, nativeMTP: NativeMTP?) async throws {
         guard let nativeMTP else { throw ApplyError.unknownOption }
-        let segment = value?.stringValue ?? "off"
-        guard segment == "off" || (segment == "auto" && !nativeMTP.blocked) else {
+        guard value == nil || value?.stringValue != nil,
+            let mode = NativeMTPSelectionDefault.mode(for: value?.stringValue),
+            mode != .auto || !nativeMTP.blocked
+        else {
             throw ApplyError.invalidValue
         }
         var settings = ServerController.runtimeSettingsForConfigureTool().settings
-        settings.mtp.mode = segment == "off" ? .off : .auto
+        settings.mtp.mode = mode
         settings.mtp.draftTokenLimit = nil
         settings.mtp.explicitDepth = nil
-        _ = await ServerController.applyRuntimeSettingsFromConfigureTool(settings)
+        _ = await ServerController.applyRuntimeSettingsFromConfigureTool(
+            settings, mtpSelectionIsFamilyDefault: mode == .familyDefault)
     }
 
     /// Stores one choice the way the Mac composer's picker rows do. A nil

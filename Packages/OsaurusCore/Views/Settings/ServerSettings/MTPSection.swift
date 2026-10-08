@@ -64,10 +64,16 @@ struct MTPSection: View {
             SettingsField(
                 label: "Mode",
                 hint:
-                    "Off uses autoregressive decoding. On requests adaptive native MTP when bundle safety and verified tuning allow it; otherwise ordinary decoding remains active. See the resolved reason below. A selected DFlash 2 drafter is separate and replaces native MTP."
+                    "Default enables adaptive native MTP for supported Qwen3.8 Flash-Next bundles and compatible bundled DFlash 2 for Qwen 27B. Off uses autoregressive decoding everywhere. On requests a compatible bundled or selected DFlash 2 drafter, or adaptive native MTP where supported. See the resolved reason below. Speed depends on the model and workload."
             ) {
                 Picker("", selection: Binding(
-                    get: { draft.mtp.mode == .off ? VMLXMTPServerMode.off : .auto },
+                    get: {
+                        switch draft.mtp.mode {
+                        case .off: VMLXMTPServerMode.off
+                        case .familyDefault: VMLXMTPServerMode.familyDefault
+                        default: VMLXMTPServerMode.auto
+                        }
+                    },
                     set: { mode in
                         var selection = draft.mtp
                         selection.mode = mode
@@ -75,6 +81,7 @@ struct MTPSection: View {
                     }
                 )) {
                     Text(L("Off (AR)")).tag(VMLXMTPServerMode.off)
+                    Text(L("Default")).tag(VMLXMTPServerMode.familyDefault)
                     Text(L("On (Adaptive)")).tag(VMLXMTPServerMode.auto)
                 }
                 .pickerStyle(.segmented)
@@ -144,7 +151,7 @@ struct MTPSection: View {
                     } else {
                         Text(
                             L(
-                                "None selected — speculation falls back to the model's own MTP head, per Mode above."
+                                "No external folder selected — a compatible bundled DFlash 2 drafter is used first, otherwise the model's native MTP policy applies. Off (AR) disables both."
                             )
                         )
                         .font(.system(size: 11))
@@ -181,7 +188,7 @@ struct MTPSection: View {
                 // only target-family loads surface early.
                 let resolvedNames = Set(loadedModels.map(\.name))
                 loadingMTP = inspected.filter {
-                    $0.isTargetMTPFamily && !resolvedNames.contains($0.name)
+                    $0.speculationAvailable && !resolvedNames.contains($0.name)
                 }
                 try? await Task.sleep(for: .seconds(2))
             }
@@ -200,13 +207,7 @@ struct MTPSection: View {
             ForEach(loadingMTP, id: \.name) { model in
                 resolvedRow(
                     label: model.name,
-                    value: model.bundleHasMTP
-                        ? (model.isBlocked
-                            ? "MTP head detected · blocked by tuning"
-                            : (model.measuredFamilyAutoDepth.map {
-                                "MTP head detected · auto depth \($0)"
-                            } ?? "MTP head detected"))
-                        : "No MTP head",
+                    value: model.speculationCapabilityDescription,
                     detail: "Warming up — \(model.statusLine)"
                 )
             }

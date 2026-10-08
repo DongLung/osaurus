@@ -478,6 +478,9 @@ struct FloatingInputCard: View {
     /// Mirrors `mtp.mode` / `mtp.draftTokenLimit` so the row renders the value
     /// that is actually saved rather than a local guess.
     @State private var nativeMTPSelection: String = "off"
+    /// Bundles the shipped default turns on (Qwen3.8 Flash-Next, `measuredFamilyAutoDepth != nil`). Under
+    /// `mtp.mode == .familyDefault` the row shows On only for these, i.e. what the engine will run.
+    @State private var nativeMTPFamilyDefaultOnModels: Set<String> = []
 
     // MARK: - MTP Bundle-Layout Advisory State
 
@@ -2498,7 +2501,7 @@ extension FloatingInputCard {
         let manuallyBlocked = nativeMTPManuallyBlockedModels.contains(identity)
         return ModelOptionDefinition(
             id: Self.nativeMTPOptionID,
-            label: L("Native MTP"),
+            label: L("Speculative Decoding"),
             icon: "hare",
             kind: .segmented(
                 manuallyBlocked
@@ -2514,7 +2517,7 @@ extension FloatingInputCard {
                     "Speculative decoding is disabled for this bundle because its MTP head is not safe for production use."
                 )
                 : L(
-                    "Off uses ordinary autoregressive decoding. On requests adaptive native MTP when the bundle passes runtime safety and tuning checks. Ineligible bundles continue with ordinary decoding; see Speculative Decoding settings for the resolved reason. Sampling stays unchanged."
+                    "Off uses ordinary autoregressive decoding. On uses a compatible bundled or selected DFlash 2 drafter, or adaptive native MTP when supported. Ineligible requests continue with ordinary decoding; see Speculative Decoding settings for the resolved reason. Sampling stays unchanged."
                 )
         )
     }
@@ -2531,24 +2534,17 @@ extension FloatingInputCard {
     ///
     /// Depth-only changes apply to the next request; changes that require a
     /// different loaded model graph follow the guarded reload lifecycle.
-    private func applyNativeMTPSegment(_ segment: String) {
+    private func applyNativeMTPSegment(_ segment: String?) {
         Task { @MainActor in
             // Read the latest settings when the task executes; only an
             // explicit control action writes MTP. Selection is read-only.
             var settings = ServerController.runtimeSettingsForConfigureTool().settings
-            switch segment {
-            case "off":
-                settings.mtp.mode = .off
-                settings.mtp.draftTokenLimit = nil
-                settings.mtp.explicitDepth = nil
-            case "auto":
-                settings.mtp.mode = .auto
-                settings.mtp.draftTokenLimit = nil
-                settings.mtp.explicitDepth = nil
-            default:
-                return
-            }
-            _ = await ServerController.applyRuntimeSettingsFromConfigureTool(settings)
+            guard let mode = NativeMTPSelectionDefault.mode(for: segment) else { return }
+            settings.mtp.mode = mode
+            settings.mtp.draftTokenLimit = nil
+            settings.mtp.explicitDepth = nil
+            _ = await ServerController.applyRuntimeSettingsFromConfigureTool(
+                settings, mtpSelectionIsFamilyDefault: mode == .familyDefault)
             // A rejected save must not leave an optimistic segment displayed.
             nativeMTPSelection = Self.nativeMTPSegment(
                 ServerController.runtimeSettingsForConfigureTool().settings.mtp)
@@ -2584,18 +2580,20 @@ extension FloatingInputCard {
                     loadingNames.compactMap { name in
                         guard
                             let status = ModelRuntime.inspectLoadingModelMTP(name: name),
-                            status.bundleHasMTP, status.isTargetMTPFamily
+                            status.speculationAvailable
                         else { return nil }
                         return status
                     }
                 }.value
                 nativeMTPCapableModels.formUnion(early.map { Self.mtpIdentity($0.name) })
+                nativeMTPFamilyDefaultOnModels.formUnion(
+                    early.filter { $0.familyDefaultOn }.map { Self.mtpIdentity($0.name) })
                 // A blocked tuning artifact must gate the EARLY window too —
                 // the resident-summary blocked set only covers loaded models,
                 // so without this the whole warmup would show depth segments
                 // the engine will refuse.
                 nativeMTPManuallyBlockedModels.formUnion(
-                    early.filter(\.isBlocked).map { Self.mtpIdentity($0.name) }
+                    early.filter(\.speculationBlocked).map { Self.mtpIdentity($0.name) }
                 )
             }
             let residentIdentities = Set(summaries.map { Self.mtpIdentity($0.name) })
@@ -3279,12 +3277,14 @@ extension FloatingInputCard {
         var displayDefaults = defaults
         if options.contains(where: { $0.id == Self.nativeMTPOptionID }) {
             let identity = Self.mtpIdentity(model)
+            let mode = ServerController.runtimeSettingsForConfigureTool().settings.mtp.mode
+            let familyDefault = nativeMTPFamilyDefaultOnModels.contains(identity) ? "auto" : "off"
+            let shown = mode == .familyDefault ? familyDefault : nativeMTPSelection
             values[Self.nativeMTPOptionID] = .string(
-                nativeMTPManuallyBlockedModels.contains(identity) ? "off" : nativeMTPSelection
+                nativeMTPManuallyBlockedModels.contains(identity) ? "off" : shown
             )
-            displayDefaults[Self.nativeMTPOptionID] = .string(
-                "off"
-            )
+            // The default this bundle gets without a user choice (Flash-Next: On).
+            displayDefaults[Self.nativeMTPOptionID] = .string(familyDefault)
         }
 
         return ModelPickerOptionsControl(
@@ -3298,7 +3298,7 @@ extension FloatingInputCard {
                 // per-model would persist a value the load path never reads.
                 if optionId == Self.nativeMTPOptionID {
                     DispatchQueue.main.async {
-                        applyNativeMTPSegment(newValue?.stringValue ?? "off")
+                        applyNativeMTPSegment(newValue?.stringValue)
                     }
                     return
                 }
@@ -4391,9 +4391,14 @@ extension FloatingInputCard {
                 // The selection may have moved while we were on disk.
                 guard selectedModel == model else { return }
                 let identity = Self.mtpIdentity(model)
-                if let capability, capability.bundleHasMTP, capability.isTargetMTPFamily {
+                if let capability, capability.speculationAvailable {
                     nativeMTPCapableModels.insert(identity)
-                    if capability.isBlocked {
+                    if capability.familyDefaultOn {
+                        nativeMTPFamilyDefaultOnModels.insert(identity)
+                    } else {
+                        nativeMTPFamilyDefaultOnModels.remove(identity)
+                    }
+                    if capability.speculationBlocked {
                         nativeMTPManuallyBlockedModels.insert(identity)
                     } else {
                         nativeMTPManuallyBlockedModels.remove(identity)
