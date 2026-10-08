@@ -3,6 +3,48 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.20</title>
+            <pubDate>Thu, 08 Oct 2026 15:52:49 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.20</sparkle:version>
+            <sparkle:shortVersionString>0.25.20</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.20/Osaurus-0.25.20.dmg" length="82531729" type="application/octet-stream" sparkle:edSignature="xs3kLCElozwkn/a4PwQWYH+GGMNfzYJ0SxKoHxK39u/pMNlVP9VCXCs7X5WNP7AOqroa6re/GSsl1A0DD4r7DQ=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- Add calculate built-in tool for exact math (#3039) by @jjang-ai
+- Say why images are unavailable instead of dropping a pasted image (#3021) (#3040) by @jjang-ai
+- harden the phone's secure channel and pairing, and expand phone image generation (#3044) by @RaajeevChandran
+- Consume merged tool-stream and K2 runtime fixes (#3046) by @jjang-ai
+- Clarify judge polarity and ScreenContext rubric while preserving verdict gating (#3033) by @jjang-ai
+- Compaction turns reasoning off in a form self-hosted servers read (#3036) (#3042) by @jjang-ai
+- move agent action bar back out of the actions tab (#3045) by @RaajeevChandran
+- Host MCP servers see version-manager toolchains (#3024) (#3038) by @jjang-ai
+- Model RAM estimates exclude the SSD-resident n-gram table (#3043) by @jjang-ai
+- Expose bundle-aware speculative defaults before model load (#3029) by @jjang-ai
+- Support local grammar-constrained JSON Schema output (#3028) by @jjang-ai
+- send the native mtp option to the phone's model picker for bundles with an mtp head (#3020) by @RaajeevChandran
+- Integrate K2-Horizon runtime and native reasoning contracts (#3019) by @jjang-ai
+- only show a pairing code while the server is running (#3018) by @RaajeevChandran
+
+## 🚀 Features
+
+- move agent action bar into its own actions tab under general (#3041) by @RaajeevChandran
+
+## 🐛 Bug Fixes
+
+- fix file\_edit dropping an explicit empty new\_string (#3048) by @RaajeevChandran
+- fix longer code fences and render labeled prose fences as code (#3034) by @RaajeevChandran
+- Pin Flash native MTP verification corrections (#3022) by @jjang-ai
+- Pin PromptSection token estimation main thread hang fix (#3011) by @[sentry[bot]](https://github.com/apps/sentry)
+- Fix app hang from synchronous UserDefaults write in ChatTabLayoutStore (#3003) by @[sentry[bot]](https://github.com/apps/sentry)
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.19...0.25.20
+]]></description>
+        </item>
+        <item>
             <title>0.25.19</title>
             <pubDate>Mon, 05 Oct 2026 19:45:47 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
