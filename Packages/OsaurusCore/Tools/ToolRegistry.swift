@@ -779,7 +779,8 @@ public final class ToolRegistry: ObservableObject {
             argumentsJSON: normalized,
             schema: tool.parameters,
             toolName: name,
-            hint: tool.argumentHint
+            hint: tool.argumentHint,
+            preservingEmpty: tool.preservedEmptyStringArguments
         ) else { return }
         try await runPermissionGate(
             tool: tool,
@@ -1390,7 +1391,8 @@ public final class ToolRegistry: ObservableObject {
             argumentsJSON: normalizedArguments,
             schema: tool.parameters,
             toolName: name,
-            hint: tool.argumentHint
+            hint: tool.argumentHint,
+            preservingEmpty: tool.preservedEmptyStringArguments
         ) {
         case .rejected(let envelopeJSON):
             return envelopeJSON
@@ -1737,14 +1739,15 @@ public final class ToolRegistry: ObservableObject {
         argumentsJSON: String,
         schema: JSONValue?,
         toolName: String,
-        hint: ((String) -> String?)? = nil
+        hint: ((String) -> String?)? = nil,
+        preservingEmpty: Set<String> = []
     ) -> PreflightOutcome {
         guard let schema,
             let data = argumentsJSON.data(using: .utf8),
             let parsed = try? JSONSerialization.jsonObject(with: data)
         else { return .ready(argumentsJSON: argumentsJSON) }
 
-        let coerced = SchemaValidator.coerceArguments(parsed, against: schema)
+        let coerced = SchemaValidator.coerceArguments(parsed, against: schema, preservingEmpty: preservingEmpty)
         let result = SchemaValidator.validate(arguments: coerced, against: schema)
         if !result.isValid, var message = result.errorMessage {
             // Tools can explain where a misplaced key belongs (e.g. `sheet`
