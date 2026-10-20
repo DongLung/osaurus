@@ -61,6 +61,18 @@ struct RuntimePolicySourceTests {
         }
     }
 
+    @Test("prefill step: tuning record, then server setting, then the architecture's recommendation")
+    func prefillStepFallsBackToArchitectureRecommendation() throws {
+        let adapter = try Self.source("Services/ModelRuntime/MLXBatchAdapter.swift")
+        #expect(
+            adapter.contains(
+                """
+                prefillStepSize: ModelPrefillTuningStore.tunedStepSize(for: modelName)
+                                ?? runtime.concurrency.prefillStepSize
+                                ?? container.recommendedPrefillStepSize,
+                """))
+    }
+
     @Test("HTTP max tokens does not invent a hidden reasoning budget")
     func httpMaxTokensDoesNotInventReasoningBudget() throws {
         let adapter = try Self.source("Services/ModelRuntime/MLXBatchAdapter.swift")
@@ -808,7 +820,7 @@ struct RuntimePolicySourceTests {
         // and both xcworkspace Package.resolved files. Miss one and a release
         // surface resolves a revision nobody proved. OsaurusEvals resolves
         // this manifest transitively and its local Package.resolved is ignored.
-        let expectedRuntimeHardenedRevision = "f9f5e0aa9e042f006ee6a948f28d835b3e065ea6"
+        let expectedRuntimeHardenedRevision = "0ee4eff0ec96069f35bd3ea6605d04cb319da06a"
         let manifestRevision = try Self.vmlxPinRevision(in: manifest)
         let coreResolvedRevision = try Self.vmlxPinRevision(in: coreResolved)
         let workspaceRevision = try Self.vmlxPinRevision(in: workspaceResolved)

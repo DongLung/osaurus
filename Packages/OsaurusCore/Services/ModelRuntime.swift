@@ -5535,6 +5535,7 @@ public actor ModelRuntime {
             let name = url.lastPathComponent
             return name.hasSuffix(".safetensors")
                 || name == "config.json"
+                || name == "jang_config.json"
                 || name == "tokenizer.json"
                 || name == "tokenizer_config.json"
         }
@@ -5542,6 +5543,16 @@ public actor ModelRuntime {
         let parts =
             interesting
             .map { url -> String in
+                // JANG normalization/storage declarations alter activations without
+                // changing weight files. Hash this small sidecar so even a same-size
+                // edit with a preserved timestamp invalidates old KV/SSM state.
+                if url.lastPathComponent == "jang_config.json" {
+                    guard let data = try? Data(contentsOf: url) else {
+                        return "jang_config.json:unreadable:\(UUID().uuidString)"
+                    }
+                    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                    return "jang_config.json:sha256:\(digest)"
+                }
                 let values = try? url.resourceValues(forKeys: [
                     .fileSizeKey, .contentModificationDateKey,
                 ])
@@ -7270,6 +7281,14 @@ public actor ModelRuntime {
                     !ciImage.extent.isEmpty, !ciImage.extent.isInfinite
                 else {
                     throw ImageInputError(imageIndex: index, reason: "the image format is unsupported or its data is corrupt.")
+                }
+                if PrefillDebugLog.shared.isEnabled {
+                    // Identifies the bytes each turn hands the processor, next to the engine's
+                    // per-component media salt trace.
+                    let digest = SHA256.hash(data: imageData).prefix(6).map { String(format: "%02x", $0) }.joined()
+                    PrefillDebugLog.shared.log(
+                        "     IMAGE-SOURCE index=\(index) bytes=\(imageData.count) sha=\(digest) "
+                            + "extent=\(ciImage.extent) colorSpace=\(ciImage.colorSpace?.name.map { $0 as String } ?? "nil")")
                 }
                 sources.append(.ciImage(ciImage))
             } else if let url = URL(string: urlString), url.scheme != nil {
