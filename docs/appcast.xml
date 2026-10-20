@@ -3,6 +3,39 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.24</title>
+            <pubDate>Tue, 20 Oct 2026 15:44:27 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.24</sparkle:version>
+            <sparkle:shortVersionString>0.25.24</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.24/Osaurus-0.25.24.dmg" length="83702185" type="application/octet-stream" sparkle:edSignature="bG3AFPVkfq+kr6o2waJTdneRhw+rDfTqj7Fh096XYxcXXSRhOSSHLpALybeuJwA68y8+dYLrDzeXBU5BNuPMBA=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- FLUX 3 Image Klein: generate, edit, references, delegated jobs (#3145) by @jjang-ai
+- Pin vmlx-swift #623: Ornith 122B Adaptive MTP by default, colour parity, router tail (#3142) by @jjang-ai
+- Ornith 122B: architecture prefill step, pin vmlx-swift#621 cache reuse (#3140) by @jjang-ai
+- make phone runs own their mac chat, catch spoken pii and let a phone call set the privacy filter (#3135) by @RaajeevChandran
+- Allosaurus 0.2 on 48 GB Macs: pin vmlx-swift adaptive-MTP lookahead, 48 GB test plan (#3129) by @jjang-ai
+- Allosaurus 0.2 JANGHT on 48 GB Macs: pin vmlx-swift exact native MTP and decode speedups (#3125) by @jjang-ai
+
+## 🚀 Features
+
+- add gpt-6.1-sol to the chatgpt model list (#3141) by @RaajeevChandran
+
+## 🐛 Bug Fixes
+
+- fix slack app messages confirm opening behind the settings sheet (#3146) by @RaajeevChandran
+- Never refuse a chat turn from an estimated context overflow (#3143) by @jjang-ai
+- Fix blank model search after selecting a lower list entry (#3133) by @jjang-ai
+- Correct Qwen hybrid child memory estimates and preserve model residency (#3132) by @jjang-ai
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.23...0.25.24
+]]></description>
+        </item>
+        <item>
             <title>0.25.23</title>
             <pubDate>Sat, 17 Oct 2026 01:49:49 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
