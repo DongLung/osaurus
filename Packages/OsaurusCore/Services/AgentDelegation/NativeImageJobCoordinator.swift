@@ -626,18 +626,26 @@ actor NativeImageJobCoordinator {
                 available: models,
                 kind: kind
             )
-            let requiredPeakBytes = try await estimateMemory(model)
+            let advisory = ImageModelRequestPolicy(canonical: models.first { $0.id == model }?.canonicalName).estimatesAreAdvisory
+            // An estimate that cannot be computed never refuses the job (advisory only).
+            let requiredPeakBytes: Int64
+            do { requiredPeakBytes = try await estimateMemory(model) } catch {
+                print("[Image] handoff memory estimate unavailable (\(error)); continuing")
+                requiredPeakBytes = 0
+            }
+            if advisory { print("[Flux3] advisory_handoff_estimate_bytes=\(requiredPeakBytes)") }
             let plan = try await SubagentResidency.planForLocalTarget(
                 modelName: model,
                 requiredBytes: requiredPeakBytes,
                 config: config,
                 idleWaitSeconds: config.budgets.maxElapsedSeconds,
                 deniedMessage: "Cannot hand off the invoking model for an image job.",
-                invokingParentModelName: context.invocation.parentModelName
+                invokingParentModelName: context.invocation.parentModelName,
+                memoryEstimateIsAdvisory: advisory
             )
             try await ChatResidencyHandoff.memoryPreflight(
                 requiredBytes: requiredPeakBytes,
-                enabled: config.ramSafetyPreflightEnabled,
+                enabled: config.ramSafetyPreflightEnabled && !advisory,
                 physicalCapacityOnly: true, estimateIncludesWorkspace: true
             )
             try checkInterrupt()
@@ -659,7 +667,7 @@ actor NativeImageJobCoordinator {
                     source: context.invocation.source?.inferenceSource
                 )
             }
-            if config.ramSafetyPreflightEnabled {
+            if config.ramSafetyPreflightEnabled && !advisory {
                 _ = await ModelRuntime.shared.reclaimMemoryForSubagentAdmission()
                 try await Task.sleep(for: .milliseconds(1_100))
                 try await ChatResidencyHandoff.memoryPreflight(
