@@ -728,6 +728,10 @@ struct ChatCompletionRequest: Codable, Sendable {
     /// turns become the model context and the new turns are appended back
     /// (docs/MOBILE_PROTOCOL.md §14.5). Owner callers only.
     var osaurus_session_id: String? = nil
+    /// Osaurus Connect: `osaurus_session_id` names a chat the phone starts
+    /// with this run; the Mac creates it when it has no such chat
+    /// (docs/MOBILE_PROTOCOL.md §14.5). The owner's paired phone only.
+    var osaurus_create_session: Bool? = nil
     /// Osaurus Connect: the phone's name for this run. The owner's phone run
     /// keeps going when its connection drops, and the phone rejoins it by
     /// this id (docs/MOBILE_PROTOCOL.md §6.4). Owner callers only.
@@ -737,6 +741,12 @@ struct ChatCompletionRequest: Codable, Sendable {
     /// placed after the conversation and never saved with it
     /// (docs/MOBILE_PROTOCOL.md §6.5). Owner callers only.
     var osaurus_voice_call: Bool? = nil
+    /// Osaurus Connect: how the Privacy Filter treats this voice-call turn,
+    /// as the user chose when the call started: `off` sends it as written,
+    /// `auto` redacts every detection without a review. Honoured only from
+    /// the owner on the Secure Channel
+    /// (docs/MOBILE_PROTOCOL.md §6.5).
+    var osaurus_privacy: String? = nil
     /// Deterministic-sampling seed (OpenAI v1.x). When set, identical
     /// requests should yield identical completions on the same backend.
     var seed: Int? = nil
@@ -867,7 +877,7 @@ struct ChatCompletionRequest: Codable, Sendable {
     /// Osaurus Connect fields, decoded only: they belong to this Mac and are
     /// never encoded into a request forwarded to a provider.
     private enum OsaurusCodingKeys: String, CodingKey {
-        case osaurus_session_id, osaurus_run_id, osaurus_voice_call
+        case osaurus_session_id, osaurus_create_session, osaurus_run_id, osaurus_voice_call, osaurus_privacy
     }
 
     func withModel(_ newModel: String) -> ChatCompletionRequest {
@@ -1011,8 +1021,10 @@ extension ChatCompletionRequest {
         reasoning_effort = try container.decodeIfPresent(String.self, forKey: .reasoning_effort)
         let osaurus = try decoder.container(keyedBy: OsaurusCodingKeys.self)
         osaurus_session_id = try osaurus.decodeIfPresent(String.self, forKey: .osaurus_session_id)
+        osaurus_create_session = try osaurus.decodeIfPresent(Bool.self, forKey: .osaurus_create_session)
         osaurus_run_id = try osaurus.decodeIfPresent(String.self, forKey: .osaurus_run_id)
         osaurus_voice_call = try osaurus.decodeIfPresent(Bool.self, forKey: .osaurus_voice_call)
+        osaurus_privacy = try osaurus.decodeIfPresent(String.self, forKey: .osaurus_privacy)
     }
 }
 

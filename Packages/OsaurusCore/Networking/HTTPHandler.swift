@@ -4726,7 +4726,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     private struct AgentListResponse: Codable {
         let agents: [AgentListItem]
+        /// What this Mac does that an older one doesn't, for a client to
+        /// check before relying on it (docs/MOBILE_PROTOCOL.md §14.5).
+        var features: [String] = HTTPHandler.connectFeatures
     }
+
+    /// `session_create`: a run may start a chat with `osaurus_create_session`.
+    static let connectFeatures = ["session_create"]
 
     /// The Action Bar a client shows for `agent`: its own, else for the
     /// Orchestrator the configure-oriented defaults its Mac chat shows (a
@@ -5087,12 +5093,18 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         /// offers and its starting price, for the phone's controls and its
         /// spend confirmation (MOBILE_PROTOCOL.md §12.5).
         let cloud: PickerCloudImageDTO?
+        /// For a cloud chat model: how the Privacy Filter treats a run on it,
+        /// `review` (asks before sending) or `auto` (redacts unasked); absent
+        /// when it doesn't run, so a voice call can ask the user first
+        /// (MOBILE_PROTOCOL.md §6.5).
+        let privacy: String?
 
         enum CodingKeys: String, CodingKey {
             case id, name, provider, source, vision, thinking, params, quantization, available, description, tab
             case kind, edits
             case image
             case cloud
+            case privacy
             case tabTitle = "tab_title"
             case favoriteKey = "favorite_key"
             case contextLength = "context_length"
@@ -5211,13 +5223,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
     }
 
-    private struct PickerModelsResponse: Encodable {
-        /// In the Mac picker's tab order, and its order within each tab.
-        let models: [PickerModelDTO]
-        /// The Mac's favourite model keys, oldest first.
-        let favorites: [String]
-    }
-
     /// Whether the caller owns this Mac: loopback, or a master-scoped key
     /// (e.g. the Osaurus Connect phone). Agent-scoped / workspace keys don't.
     private func callerOwnsThisMac(_ context: ChannelHandlerContext) -> Bool {
@@ -5260,9 +5265,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             // Chat models, ready on-device image models and available cloud
             // image models, which the Mac picker also lists (picking one puts
             // the composer in image mode).
-            let items = await ModelPickerItemCache.shared.buildModelPickerItems()
+            // The items as they stand: kept current by every change already,
+            // where a rebuild per request cost the phone seconds a time.
+            let clock = ContinuousClock()
+            let began = clock.now
+            let allItems = await ModelPickerItemCache.shared.currentItems()
+            let gathered = clock.now
+            let items = allItems
                 .filter { $0.isLikelyChatCapable || $0.isPhoneImageModel || PickerCloudImageDTO($0) != nil }
             let favorites = await MainActor.run { FavoriteModelsStore.shared.favoriteKeys }
+            let privacyConfig = PrivacyFilterStore.snapshot()
             // Grouped as the Mac picker groups them, so the phone shows the
             // same tabs in the same order.
             let tabbed = items.groupedByTab().flatMap { tab in tab.models.map { (tab: tab, item: $0) } }
@@ -5277,6 +5289,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 case .imageGeneration: source = "image"
                 }
                 let cloud = PickerCloudImageDTO(item)
+                var privacy: String?
+                if case .remote(_, let providerId) = item.source, privacyConfig.isEnabled(forProviderId: providerId) {
+                    privacy = privacyConfig.alwaysApproveByDefault ? "auto" : "review"
+                }
                 return PickerModelDTO(
                     id: item.id,
                     name: item.displayName,
@@ -5301,12 +5317,32 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     // Cloud models can't edit over HTTP yet.
                     edits: cloud == nil && item.isImageEditDelegateCandidate,
                     image: PickerImageDTO(item),
-                    cloud: cloud
+                    cloud: cloud,
+                    privacy: privacy
                 )
             }
-            let json =
-                (try? JSONEncoder.osaurusCanonical().encode(PickerModelsResponse(models: models, favorites: favorites)))
-                .map { String(decoding: $0, as: UTF8.self) } ?? #"{"models":[]}"#
+            // One model at a time: one that can't be encoded (a NaN in its
+            // numbers, say) is left out, and said, rather than the whole list
+            // going out empty, which emptied the phone's picker.
+            let encoder = JSONEncoder.osaurusCanonical()
+            var encoded: [String] = []
+            for model in models {
+                do {
+                    encoded.append(String(decoding: try encoder.encode(model), as: UTF8.self))
+                } catch {
+                    MobileConnectLog.write("models/picker: left out \(model.id): \(error)")
+                }
+            }
+            let favoritesJSON = (try? encoder.encode(favorites)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+            let json = #"{"favorites":"# + favoritesJSON + #","models":["# + encoded.joined(separator: ",") + "]}"
+            let sentCount = encoded.count
+            let ms = { (from: ContinuousClock.Instant, to: ContinuousClock.Instant) in
+                Int(from.duration(to: to) / .milliseconds(1))
+            }
+            MobileConnectLog.write(
+                "models/picker: sent \(sentCount) of \(models.count) models, \(json.utf8.count) bytes; "
+                    + "items \(ms(began, gathered)) ms, rest \(ms(gathered, clock.now)) ms"
+            )
             hop {
                 var headers = [("Content-Type", "application/json; charset=utf-8")]
                 headers.append(contentsOf: cors)
@@ -5316,7 +5352,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     path: "/models/picker",
                     userAgent: userAgent,
                     requestBody: nil,
-                    responseBody: "{\"models\":[\(models.count) items]}",
+                    responseBody: "{\"models\":[\(sentCount) of \(models.count) items]}",
                     responseStatus: 200,
                     startTime: startTime
                 )
@@ -7415,13 +7451,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             let contentMatches: Set<UUID> =
                 search.isEmpty ? [] : await ChatSessionStore.sessionIds(withContentContaining: search)
             let phoneSessions: Set<UUID> = await MainActor.run {
-                Set(
-                    sessions
-                        .filter { session in
-                            session.workspace.map(RemoteSessionContinuation.isFromPairedPhone) ?? false
-                        }
-                        .map(\.id)
-                )
+                Set(sessions.filter { RemoteSessionContinuation.isFromPairedPhone($0) }.map(\.id))
             }
             // One predicate rather than a chain of `.filter`s: the chain grew
             // long enough that the type checker gave up on it.
@@ -10193,7 +10223,22 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     let raw = req.osaurus_session_id,
                     let id = UUID(uuidString: raw)
                 else { return nil }
-                return await MainActor.run { RemoteSessionContinuation.isContinuable(id) ? id : nil }
+                if await MainActor.run(body: { RemoteSessionContinuation.isContinuable(id) }) {
+                    await RemoteSessionContinuation.adoptHostedPhoneChat(id)
+                    return id
+                }
+                // A chat the phone starts with this run: the Mac keeps it from
+                // the first message, so it stays one chat however the phone's
+                // copy and the Mac's differ (tool steps, an interrupted reply).
+                guard req.osaurus_create_session == true,
+                    await MainActor.run(body: { RemoteSessionContinuation.isPairedPhoneKey(callerKeyNonce) })
+                else { return nil }
+                let started = await RemoteSessionContinuation.startPhoneChat(
+                    id,
+                    agentId: agentId,
+                    messages: req.messages
+                )
+                return started ? id : nil
             }()
             // Index of the first message this run adds to that chat (its own
             // request messages and everything the loop appends).
@@ -10206,8 +10251,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 messages.insert(contentsOf: history, at: systemCount)
                 persistFrom.value = systemCount + history.count
                 // The chat to bring forward when the user is back at the Mac.
+                // Its composer waits for this run (see `isPhoneReplying`).
                 await MainActor.run {
                     PhoneChatHandoff.shared.notePhoneRun(sessionId: continuedSessionId, keyNonce: callerKeyNonce)
+                    RemoteSessionContinuation.beginPhoneRun(continuedSessionId)
                 }
             }
             // A turn of the owner's phone call: ask for a short, spoken reply,
@@ -10224,8 +10271,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     let saved = voiceCall ? VoiceCallReplies.removingNote(from: turns) : turns
                     let appended = saved.filter { $0.role != "system" }
                     let runModel = model
-                    if !appended.isEmpty {
-                        Task { @MainActor in
+                    Task { @MainActor in
+                        if !appended.isEmpty {
                             await RemoteSessionContinuation.append(
                                 appended,
                                 to: continuedSessionId,
@@ -10236,6 +10283,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                                 keyNonce: callerKeyNonce
                             )
                         }
+                        // After its turns are in, so a send the Mac held goes after them.
+                        RemoteSessionContinuation.endPhoneRun(continuedSessionId)
                     }
                 }
             }
@@ -10292,8 +10341,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             // background task: a live read-only tab of the shared agent
             // ("Alice → Research Agent" with step + Stop), a History row from
             // the first turn, retained across relaunch until dismissed.
+            // Not a run continuing one of the Mac's chats (§14.5): that chat
+            // takes its turns, and a hosted row beside it, keyed by this
+            // request alone, split every phone turn into a chat of its own.
             let inboundRun: InboundSharedRun? = await {
-                guard isAuthenticatedRemote, let nonce = authedKeyNonce else { return nil }
+                guard isAuthenticatedRemote, continuedSessionId == nil, let nonce = authedKeyNonce else { return nil }
                 let context: WorkspaceSessionContext
                 if let record = workspaceKeyRecord {
                     let callerName = await WorkspaceCallerNameResolver.shared.displayName(
@@ -10598,7 +10650,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         n: nil,
                         tools: tools.isEmpty ? nil : tools,
                         tool_choice: resolvedToolChoice,
-                        session_id: req.session_id,
+                        // A continued chat is keyed as the Mac's own window
+                        // keys it, so the Privacy Filter remembers its
+                        // redactions across steps and turns (and shares them
+                        // with the Mac). Without a key it started afresh on
+                        // every model call: the phone, which sends none for
+                        // a Mac chat, was asked again each step, and earlier
+                        // turns went out unredacted. With no key at all, the
+                        // run's own: its steps at least share one memory.
+                        session_id: continuedSessionId?.uuidString ?? req.session_id ?? requestId,
                         seed: req.seed,
                         response_format: req.response_format,
                         stream_options: req.stream_options
@@ -11070,7 +11130,12 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 // the parallel batch executor inherit the task-locals.
                 // `currentFolderRoot` scopes the folder tools + undo +
                 // change checkpoints to THIS run's granted folder.
-                let runResult = try await ChatExecutionContext.$hasRemoteReviewer
+                // The owner's phone call may turn the Privacy Filter off, or
+                // its review to auto-accept, for its own turns (§6.5).
+                let callPrivacy = remoteReviewer ? req.osaurus_privacy.flatMap(VoiceCallPrivacy.init(rawValue:)) : nil
+                let runResult = try await ChatExecutionContext.$voiceCallPrivacy
+                    .withValue(callPrivacy) {
+                    try await ChatExecutionContext.$hasRemoteReviewer
                     .withValue(remoteReviewer) {
                     try await ChatExecutionContext.$workspaceBillingContext
                     .withValue(workspaceBilling) {
@@ -11092,6 +11157,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                             }
                     }
                     }
+                    }
                 exitState = runResult.exit
                 RemoteAgentRunLog.server(
                     "run loop done agent=\(agentId.uuidString) model=\(model) exit=\(String(describing: exitState))"
@@ -11100,9 +11166,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             } catch {
                 inboundOutcome.record(error: error, cancelled: disconnected.value)
                 await releaseHostFolder()
-                RemoteAgentRunLog.serverError(
-                    "run loop FAILED agent=\(agentId.uuidString) model=\(model) error=\(error.localizedDescription)"
-                )
+                // Stopped, or a send the user declined in a privacy review,
+                // is how a run is meant to end then: no error to log.
+                if error is CancellationError {
+                    RemoteAgentRunLog.server("run loop cancelled agent=\(agentId.uuidString) model=\(model)")
+                } else {
+                    RemoteAgentRunLog.serverError(
+                        "run loop FAILED agent=\(agentId.uuidString) model=\(model) error=\(error.localizedDescription)"
+                    )
+                }
                 // SSE response head was already written as 200 — the
                 // failure surfaces as an in-band SSE error chunk. Log
                 // the actual on-wire status (200) so dashboards don't
@@ -12581,7 +12653,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             // Into the Mac chat the phone named, as local images are; the same
             // owner-and-Secure-Channel rule applies.
-            let remoteSession = phoneImageSession(req.osaurus_session_id, context: context)
+            let remoteSession = phoneImageSession(
+                req.osaurus_session_id,
+                startsUnder: req.osaurus_create_session == true ? req.osaurus_agent_id : nil,
+                context: context
+            )
             if remoteSession != nil,
                 requiresOwnerChannel(
                     head: head,
@@ -12615,7 +12691,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
         let modelId = selectedTarget.modelID
-        let continuedSession = phoneImageSession(req.osaurus_session_id, context: context)
+        let continuedSession = phoneImageSession(
+            req.osaurus_session_id,
+            startsUnder: req.osaurus_create_session == true ? req.osaurus_agent_id : nil,
+            context: context
+        )
         if continuedSession != nil,
             requiresOwnerChannel(
                 head: head, context: context, path: "/images/generations", startTime: startTime, userAgent: userAgent)
@@ -12673,8 +12753,20 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     /// The Mac chat an owner's phone named with `osaurus_session_id` on an
     /// image request (docs/MOBILE_PROTOCOL.md §12.5); nil for anyone else.
-    private func phoneImageSession(_ raw: String?, context: ChannelHandlerContext) -> UUID? {
+    /// `startsUnder` is the agent of a chat the phone starts with this image
+    /// (§14.5): the exchange then creates it.
+    private func phoneImageSession(
+        _ raw: String?,
+        startsUnder agentRaw: String? = nil,
+        context: ChannelHandlerContext
+    ) -> UUID? {
         guard let raw, let id = UUID(uuidString: raw), callerOwnsThisMac(context) else { return nil }
+        if let agentRaw, let agentId = UUID(uuidString: agentRaw) {
+            let keyNonce = inboundConnectionInfo()?.accessKeyId
+            Task { @MainActor in
+                RemoteSessionContinuation.notePhoneImageChat(id, agentId: agentId, keyNonce: keyNonce)
+            }
+        }
         return id
     }
 
@@ -13318,7 +13410,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return
         }
-        let continuedSession = phoneImageSession(req.osaurus_session_id, context: context)
+        let continuedSession = phoneImageSession(
+            req.osaurus_session_id,
+            startsUnder: req.osaurus_create_session == true ? req.osaurus_agent_id : nil,
+            context: context
+        )
         if continuedSession != nil,
             requiresOwnerChannel(
                 head: head, context: context, path: "/images/edits", startTime: startTime, userAgent: userAgent)
