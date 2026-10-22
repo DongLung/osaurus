@@ -3,6 +3,41 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.25</title>
+            <pubDate>Thu, 22 Oct 2026 14:03:50 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.25</sparkle:version>
+            <sparkle:shortVersionString>0.25.25</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.25/Osaurus-0.25.25.dmg" length="83536687" type="application/octet-stream" sparkle:edSignature="+/tCU7cI7EFMQ77U+uk/kcB6GL9ojt6kVODfAQJAEpxnatFK9g+tbpgziHFvyQhiq1yMMmwdWYmJjph3qIK6Dw=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- feat: integrate Flint runtime, owned weights and SSD reuse fixes (#3161) by @jjang-ai
+- Remove retired cold-weight tier setting and status APIs (#3156) by @jjang-ai
+- Align adaptive drafter loading and remove legacy fixed widths (#3150) by @jjang-ai
+- Pin hybrid cache checkpoint RAM improvements (#3147) by @jjang-ai
+
+## 🐛 Bug Fixes
+
+- Pin lower batch checkpoint memory and shared SSD writer reservations (#3168) by @jjang-ai
+- Resolve declared reasoning tiers across bundle metadata formats (#3167) by @jjang-ai
+- Honor declared native Off/On reasoning efforts (#3166) by @jjang-ai
+- fix: retain durable SSD seed reuse across model reloads (#3165) by @jjang-ai
+- Qualify allocator-owned model loading in Osaurus (#3162) by @jjang-ai
+- Pin edited-chat SSD resume protection (#3158) by @jjang-ai
+- Align RAM gauge with load and delegation capacity accounting (#3157) by @jjang-ai
+- Pin prompt snapshot ownership correction (#3155) by @jjang-ai
+- Honor explicit SSD cache quotas and show space advisories (#3154) by @jjang-ai
+- tie paired phone features to the phone's access key (#3152) by @RaajeevChandran
+- Refresh image progress on equal-length status updates (#3151) by @jjang-ai
+- Fix image composer pasted prompts, regeneration, and rendering (#3149) by @jjang-ai
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.24...0.25.25
+]]></description>
+        </item>
+        <item>
             <title>0.25.24</title>
             <pubDate>Tue, 20 Oct 2026 15:44:27 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
