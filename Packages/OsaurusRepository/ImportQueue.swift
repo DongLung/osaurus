@@ -167,6 +167,9 @@ public struct ImportReceipt: Codable, Sendable, Equatable {
     public var skills: [String]?
     public var mcpServers: [String]?
     public var harnessRuntime: String?
+    /// For settings: the value the bundle asked for when it last applied.
+    /// A later update leaves the setting alone once the user changes it.
+    public var settingValue: BundleSettingValue?
 
     public init(
         bundleId: String,
@@ -186,7 +189,8 @@ public struct ImportReceipt: Codable, Sendable, Equatable {
         skills: [String]? = nil,
         mcpServers: [String]? = nil,
         harnessRuntimeId: String? = nil,
-        harnessRuntime: String? = nil
+        harnessRuntime: String? = nil,
+        settingValue: BundleSettingValue? = nil
     ) {
         self.bundleId = bundleId
         self.bundleName = bundleName
@@ -206,6 +210,7 @@ public struct ImportReceipt: Codable, Sendable, Equatable {
         self.mcpServers = mcpServers
         self.harnessRuntimeId = harnessRuntimeId
         self.harnessRuntime = harnessRuntime
+        self.settingValue = settingValue
     }
 
     public func matches(kind: BundleItemKind, name: String) -> Bool {
@@ -403,6 +408,13 @@ extension OsaurusBundle {
             guard let raw = try? rawHarnessRuntimeEntries()[name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()],
                 let data = try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys])
             else { return nil }
+            hasher.update(data: data)
+        case .setting:
+            guard let entry = setting(named: name), let data = try? JSONEncoder().encode(entry.value) else {
+                return nil
+            }
+            hasher.update(data: Data(entry.setting.key.utf8))
+            hasher.update(data: Data([0]))
             hasher.update(data: data)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
