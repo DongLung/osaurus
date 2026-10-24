@@ -3,6 +3,50 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.26</title>
+            <pubDate>Sat, 24 Oct 2026 01:02:10 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.26</sparkle:version>
+            <sparkle:shortVersionString>0.25.26</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.26/Osaurus-0.25.26.dmg" length="85091370" type="application/octet-stream" sparkle:edSignature="gPHs+/iEr/ol0mlUsdSFZcgkRsRcrpI7igwXw4sWOoUhwVZRmA0/n2G8uht6OEjtrCR0OUVcdDPFDtvwnxWHCg=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- Raise release build timeout to 180 minutes (#3181) by @tpae
+- Add opt-in local access key for sensitive routes, settable by bundle import (#3178) by @tpae
+- Harness runtimes in the model picker, config documents, and bundles (#3180) by @tpae
+- Add pluggable harness runtimes: Claude Code and Pi (#3175) by @tpae
+- Add `osaurus import` for Osaurus bundles (#3174) by @tpae
+- Add agent templates (file export/import) (#3172) by @tpae
+
+## 🐛 Bug Fixes
+
+- Fix: Prevent main thread hang in ExternalModelsSettingsView refreshCounts (#2866) by @[sentry[bot]](https://github.com/apps/sentry)
+- Fix: Move keychain OAuth token deletion off main thread to prevent app hang (#2925) by @[sentry[bot]](https://github.com/apps/sentry)
+- Prevent UI hang on link clicks (#2946) by @[sentry[bot]](https://github.com/apps/sentry)
+- FloatingInputCard: stop querying AVCaptureDevice synchronously on appear to fix hang (#3092) by @[sentry[bot]](https://github.com/apps/sentry)
+- Seatbelt: cache isSupported check to prevent main-thread hangs (APPLE-MACOS-37V) (#3094) by @[sentry[bot]](https://github.com/apps/sentry)
+- Use cached sandbox availability in effectiveAutonomousExec to fix main-thread hang (#3105) by @[sentry[bot]](https://github.com/apps/sentry)
+- Chat sidebar: snapshot orphaned workspace pairings once per render (#3111) by @[sentry[bot]](https://github.com/apps/sentry)
+- Memoize transcript context token totals across ChatSession renders (#3112) by @[sentry[bot]](https://github.com/apps/sentry)
+- Cache HF timestamp formatters and move org model mapping off main actor (#3120) by @[sentry[bot]](https://github.com/apps/sentry)
+- Avoid repeated @Published agents lookups in liveAgentSources (#3121) by @[sentry[bot]](https://github.com/apps/sentry)
+- fix main thread hang when creating windows by removing pre-layout pass (#3130) by @[sentry[bot]](https://github.com/apps/sentry)
+- Remove synchronous ensureLayout calls from terminal display views (#3131) by @[sentry[bot]](https://github.com/apps/sentry)
+- Use LCached for ConfigurationView static settings labels to prevent main-thread hangs (#3144) by @[sentry[bot]](https://github.com/apps/sentry)
+- Decouple MTP advisory refresh from memory usage ticks to prevent main thread hangs (#3148) by @[sentry[bot]](https://github.com/apps/sentry)
+- Pass isDirectory false when resolving custom avatar URL (#3159) by @[sentry[bot]](https://github.com/apps/sentry)
+- Cache native channel configs and attachment roots to avoid main-thread hangs (#3160) by @[sentry[bot]](https://github.com/apps/sentry)
+- Remove MainActor sort isolation in ChatModelPickerProvider (#3169) by @[sentry[bot]](https://github.com/apps/sentry)
+- Let the chat tab strip move the window like the title bar it covers (#3173) by @tpae
+- Fix stale agent paths, Browser Use title, dark tab pill and provider glyph (#3171) by @tpae
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.25...0.25.26
+]]></description>
+        </item>
+        <item>
             <title>0.25.25</title>
             <pubDate>Thu, 22 Oct 2026 14:03:50 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
