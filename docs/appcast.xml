@@ -3,6 +3,41 @@
   <channel>
     <title>Osaurus</title>
         <item>
+            <title>0.25.27</title>
+            <pubDate>Mon, 26 Oct 2026 18:20:53 +0000</pubDate>
+            <sparkle:channel>release</sparkle:channel>
+            <sparkle:version>0.25.27</sparkle:version>
+            <sparkle:shortVersionString>0.25.27</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/osaurus-ai/osaurus/releases/download/0.25.27/Osaurus-0.25.27.dmg" length="85543954" type="application/octet-stream" sparkle:edSignature="oosT7dM1zziMImMHggh5WU3mXoXEip7lNRGaN2vvx1q0pL5lzcBQacWBjb/u9eqQWRy2x/srxtJu0uoBoEKMAA=="/>
+            <description sparkle:format="markdown"><![CDATA[
+## What's Changed
+
+- deps: pin vmlx-swift 00c369f6 (DeepSeek-V4.1 JANGHT bundles, sampled dSpark) (#3211) by @jjang-ai
+- DeepSeek-V4.1-Flash: dSpark, thinking toggle, cached-token usage, image input (#3206) by @jjang-ai
+- Use typed Responses and isolate helper reports from user memory (#3203) by @jjang-ai
+- Surface initial chat-history open failures in storage recovery (#3202) by @jjang-ai
+- Preserve restored chat model during catalog discovery (#3200) by @jjang-ai
+- Consume native verification router parity repair (#3194) by @jjang-ai
+- Release SQLCipher connections after setup failures (#3195) by @jjang-ai
+- Consume cache-index ownership and base-M5 dispatch repairs (#3192) by @jjang-ai
+- Observe handled Metal interactivity failures with safe runtime context (#3189) by @jjang-ai
+- Keep chat pickers attached and consume nonfatal runtime diagnostics (#3185) by @jjang-ai
+- Add native System One decision routing for D3 bundles (#3182) by @jjang-ai
+
+## 🐛 Bug Fixes
+
+- Report cached prompt tokens in the streamed chat usage chunk (#3212) by @jjang-ai
+- Fix memory recall and delayed tool output (#3210) by @jjang-ai
+- let long-running mcp calls report progress past 120s and poll without loop nudges (#3193) by @RaajeevChandran
+- fix queued channel messages dropped when the post-turn drain is denied (#3208) by @RaajeevChandran
+- fix iphone rejecting images for remote provider models (#3207) by @RaajeevChandran
+
+**Full Changelog**: https://github.com/osaurus-ai/osaurus/compare/0.25.26...0.25.27
+]]></description>
+        </item>
+        <item>
             <title>0.25.26</title>
             <pubDate>Sat, 24 Oct 2026 01:02:10 +0000</pubDate>
             <sparkle:channel>release</sparkle:channel>
