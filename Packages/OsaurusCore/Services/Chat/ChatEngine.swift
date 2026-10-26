@@ -759,6 +759,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
         maxTokens: Int,
         tokensPerSecond: Double? = nil,
         completionTokens: Int? = nil,
+        cachedInputTokens: Int? = nil,
         content: String? = nil,
         reasoningContent: String? = nil,
         turnId: UUID? = nil,
@@ -815,7 +816,9 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
             prompt_tokens: inputTokens,
             completion_tokens: outputTokens,
             total_tokens: inputTokens + outputTokens,
-            tokens_per_second: tokensPerSecond
+            tokens_per_second: tokensPerSecond,
+            prompt_tokens_details: Usage.cachedPromptDetails(
+                cachedInputTokens, promptTokens: inputTokens)
         )
 
         let response = ChatCompletionResponse(
@@ -1823,6 +1826,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                 // turns historically reported no tok/s.
                 var toolStepTokensPerSecond: Double?
                 var toolStepTokenCount: Int?
+                var toolStepCachedInputTokens: Int?
                 var text = ""
                 var reasoning = ""
                 do {
@@ -1845,6 +1849,8 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                             resolvedInputTokens = stats.inputTokenCount ?? resolvedInputTokens
                             toolStepTokensPerSecond = stats.tokensPerSecond
                             toolStepTokenCount = stats.tokenCount
+                            toolStepCachedInputTokens =
+                                stats.cachedInputTokenCount ?? toolStepCachedInputTokens
                             if let stopReason = stats.stopReason, !stopReason.isEmpty {
                                 terminalStopReason = stopReason
                             }
@@ -1892,7 +1898,9 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                         prompt_tokens: resolvedInputTokens,
                         completion_tokens: outputTokens,
                         total_tokens: resolvedInputTokens + outputTokens,
-                        tokens_per_second: toolStepTokensPerSecond
+                        tokens_per_second: toolStepTokensPerSecond,
+                        prompt_tokens_details: Usage.cachedPromptDetails(
+                            toolStepCachedInputTokens, promptTokens: resolvedInputTokens)
                     )
 
                     let response = ChatCompletionResponse(
@@ -1943,6 +1951,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                         maxTokens: maxTokens,
                         tokensPerSecond: toolStepTokensPerSecond,
                         completionTokens: toolStepTokenCount,
+                        cachedInputTokens: toolStepCachedInputTokens,
                         content: params.collectCompleteToolResponse && !text.isEmpty ? text : nil,
                         reasoningContent: params.collectCompleteToolResponse && !reasoning.isEmpty ? reasoning : nil,
                         turnId: Self.loggedTurnId(request),
@@ -1968,6 +1977,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                         maxTokens: maxTokens,
                         tokensPerSecond: toolStepTokensPerSecond,
                         completionTokens: toolStepTokenCount,
+                        cachedInputTokens: toolStepCachedInputTokens,
                         content: params.collectCompleteToolResponse && !text.isEmpty ? text : nil,
                         reasoningContent: params.collectCompleteToolResponse && !reasoning.isEmpty ? reasoning : nil,
                         turnId: Self.loggedTurnId(request),
@@ -1999,6 +2009,7 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
             var terminalStopReason = "stop"
             var authoritativeOutputTokens: Int?
             var authoritativeTokensPerSecond: Double?
+            var authoritativeCachedInputTokens: Int?
             for try await delta in stream {
                 try Task.checkCancellation()
                 if let count = StreamingInputTokenHint.decode(delta) {
@@ -2009,6 +2020,8 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                     resolvedInputTokens = stats.inputTokenCount ?? resolvedInputTokens
                     authoritativeOutputTokens = stats.tokenCount
                     authoritativeTokensPerSecond = stats.tokensPerSecond
+                    authoritativeCachedInputTokens =
+                        stats.cachedInputTokenCount ?? authoritativeCachedInputTokens
                     if let stopReason = stats.stopReason, !stopReason.isEmpty {
                         terminalStopReason = stopReason
                     }
@@ -2042,7 +2055,9 @@ actor ChatEngine: Sendable, ChatEngineProtocol, ResponsesEngineProtocol {
                 prompt_tokens: resolvedInputTokens,
                 completion_tokens: outputTokens,
                 total_tokens: resolvedInputTokens + outputTokens,
-                tokens_per_second: authoritativeTokensPerSecond
+                tokens_per_second: authoritativeTokensPerSecond,
+                prompt_tokens_details: Usage.cachedPromptDetails(
+                    authoritativeCachedInputTokens, promptTokens: resolvedInputTokens)
             )
 
             let response = ChatCompletionResponse(

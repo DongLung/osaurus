@@ -5157,9 +5157,13 @@ public actor ModelRuntime {
                 admittedLoadBudgetBytes: admissionPlan.resolvedLoadBudgetBytes,
                 // Store the load-time DSV4 fact. Native MTP is resolved per
                 // request so toggling MTP Off cannot keep using the enlarged
-                // request allocator window.
+                // request allocator window. DeepSeek-V4.1 affine JANG needs the
+                // same window: a 2048-token prefill chunk's scratch exceeds the
+                // persistent pool, so buffers were freed and re-created inside
+                // every chunk (reference serving: 4 GB pool 475 pp/s, 16 GB 769).
                 requiresAdmittedMLXAllocatorCeiling:
                     loadBundleFacts.isPlainDeepseekV4AffineJANG
+                    || loadBundleFacts.isDeepseekV41AffineJANG
             )
 
             // Install the cache coordinator before the coalesced load task
@@ -6209,7 +6213,7 @@ public actor ModelRuntime {
         // call, so iterating to natural EOS captures all of them).
         for try await ev in events {
             switch ev {
-            case .inputTokenCount:
+            case .inputTokenCount, .cachedInputTokenCount:
                 break
             case .tokens(let s):
                 accumulated += s
@@ -6261,14 +6265,20 @@ public actor ModelRuntime {
         )
         let (stream, continuation) = AsyncThrowingStream<String, Error>.makeStream()
         let producerTask = Task {
+            var cachedInputTokens: Int?
             do {
                 for try await ev in events.events {
+                    if case .cachedInputTokenCount(let count) = ev {
+                        cachedInputTokens = count
+                        continue
+                    }
                     // Terminal usage must survive cancellation just as it does
                     // in streamWithTools; only generated deltas are suppressed.
                     if case .completionInfo(let count, let rate, let unclosed, let stop, let prefill, let mtp) = ev {
                         continuation.yield(StreamingStatsHint.encode(
                             tokenCount: count, tokensPerSecond: rate, unclosedReasoning: unclosed,
-                            stopReason: stop, prefillTokensPerSecond: prefill, mtp: mtp
+                            stopReason: stop, prefillTokensPerSecond: prefill,
+                            cachedInputTokenCount: cachedInputTokens, mtp: mtp
                         ))
                         continue
                     }
@@ -6367,6 +6377,7 @@ public actor ModelRuntime {
             var publishedTerminal = false
             var completedTools: [ServiceToolInvocation] = []
             var terminalStopReason: String?
+            var cachedInputTokens: Int?
             var hasCompletedToolPreview = false
             let traceID = PrefillDebugLog.shared.isEnabled ? UUID().uuidString : ""
 
@@ -6397,6 +6408,10 @@ public actor ModelRuntime {
                     // cleanup after it still owns its generation/cache lease.
                     if publishedTerminal { continue }
 
+                    if case .cachedInputTokenCount(let count) = ev {
+                        cachedInputTokens = count
+                        continue
+                    }
                     if case .completionInfo(
                         let tokenCount,
                         let tokensPerSecond,
@@ -6413,6 +6428,7 @@ public actor ModelRuntime {
                                 unclosedReasoning: unclosedReasoning,
                                 stopReason: stopReason,
                                 prefillTokensPerSecond: promptTokensPerSecond,
+                                cachedInputTokenCount: cachedInputTokens,
                                 mtp: mtp
                             )
                         )
@@ -6468,6 +6484,8 @@ public actor ModelRuntime {
                             hasCompletedToolPreview = true
                         }
                     case .completionInfo:
+                        continue
+                    case .cachedInputTokenCount:
                         continue
                     }
                 }
@@ -6752,12 +6770,14 @@ public actor ModelRuntime {
             jangConfig: jangConfig,
             status: status,
             // A drafter that ships in, or was selected for, this bundle: DFlash 2 (selected or
-            // bundled `dflash2/`) or a bundled Uno adapter (`uno/`, validated against the bundle by
-            // the engine). Per-request admission then keeps the loaded strategy instead of
-            // re-deriving native MTP, which would drop it.
+            // bundled `dflash2/`), a bundled Uno adapter (`uno/`, validated against the bundle by
+            // the engine), or a DeepSeek-V4.1 bundle's `dspark/` head. Per-request admission then
+            // keeps the loaded strategy instead of re-deriving native MTP, which would drop it.
             externalDrafterSelected: settings.resolvedDFlash2Selection(
                 configData: configData, bundleDirectory: modelDirectory) != nil
                 || settings.bundledUnoAdapter(
+                    configData: configData, bundleDirectory: modelDirectory) != nil
+                || settings.bundledDSparkDrafter(
                     configData: configData, bundleDirectory: modelDirectory) != nil
         )
         try admission.validateLoad(
