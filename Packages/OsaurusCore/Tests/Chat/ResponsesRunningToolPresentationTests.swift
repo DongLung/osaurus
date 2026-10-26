@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import Combine
 import Foundation
+import SwiftUI
 import Testing
 
 @testable import OsaurusCore
@@ -33,13 +34,27 @@ struct ResponsesRunningToolPresentationTests {
     private func descendants<T: NSView>(_ root: NSView, as type: T.Type) -> [T] {
         ((root as? T).map { [$0] } ?? []) + root.subviews.flatMap { descendants($0, as: type) }
     }
-    private func wait(_ condition: @MainActor () async -> Bool) async throws {
+    private func wait(_ phase: String, _ condition: @MainActor () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw NSError(domain: "ResponsesRunningToolPresentationTests.timeout", code: 1)
+        throw NSError(domain: "ResponsesRunningToolPresentationTests.timeout", code: 1, userInfo: [NSLocalizedDescriptionKey: phase])
+    }
+
+    /// Marker subscribers use the same scheduler, after the row's observers.
+    /// Deliver their initial snapshots before late registration so an initial
+    /// no-entry render cannot win or lose a race with the test's dispatch.
+    private func deliverRegistrySnapshots() async throws {
+        var liveDelivered = false
+        var feedDelivered = false
+        let live = LiveExecRegistry.shared.entriesPublisher.receive(on: RunLoop.main)
+            .prefix(1).sink { _ in liveDelivered = true }
+        let feed = SubagentFeedRegistry.shared.feedsPublisher.receive(on: RunLoop.main)
+            .prefix(1).sink { _ in feedDelivered = true }
+        defer { live.cancel(); feed.cancel() }
+        try await wait("registry marker snapshots delivered") { liveDelivered && feedDelivered }
     }
 
     @Test func completedToolCallAppearsBeforeAnyResultOrFurtherText() throws {
@@ -105,10 +120,10 @@ struct ResponsesRunningToolPresentationTests {
             descendants(row, as: NSTextView.self).map(\.string).joined(separator: "\n")
         }
         configure("printf old", expanded: true)
-        try await wait { text().contains("printf old") }
+        try await wait("initial arguments mounted") { text().contains("printf old") }
         configure("printf new", expanded: false)
         configure("printf new", expanded: true)
-        try await wait { text().contains("printf new") && !text().contains("printf old") }
+        try await wait("corrected arguments mounted") { text().contains("printf new") && !text().contains("printf old") }
     }
     private final class Stream: @unchecked Sendable {
         let output = PassthroughSubject<Data, Never>()
@@ -131,6 +146,8 @@ struct ResponsesRunningToolPresentationTests {
                 theme: LightTheme(), onToggle: {}, onHeightChanged: {})
         }
         configure(item)
+        try await deliverRegistrySnapshots()
+        #expect(descendants(row, as: TerminalDisplayView.self).isEmpty)
         let stream = Stream()
         let terminations = Terminations()
         let entry = LiveExecRegistry.Entry(toolCallId: id, pid: "fixture", command: "printf old",
@@ -143,17 +160,17 @@ struct ResponsesRunningToolPresentationTests {
         defer { Task { await LiveExecRegistry.shared.unregister(toolCallId: id) } }
         // Registration happens after the row exists, as in real dispatch.
         await LiveExecRegistry.shared.register(entry)
-        try await wait { descendants(row, as: TerminalDisplayView.self).first != nil }
+        try await wait("live terminal mounted after registration") { descendants(row, as: TerminalDisplayView.self).first != nil }
         let terminal = try #require(descendants(row, as: TerminalDisplayView.self).first)
         defer { terminal.unbind() }
         #expect(!terminal._test_terminateHidden)
-        try await wait { terminal._test_textStorageString.contains("seed output") }
+        try await wait("seed output rendered") { terminal._test_textStorageString.contains("seed output") }
         stream.output.send(Data("live output\n".utf8))
-        try await wait { terminal._test_textStorageString.contains("live output") }
+        try await wait("live output rendered") { terminal._test_textStorageString.contains("live output") }
         let terminate = try #require(descendants(row, as: NSButton.self).first { $0.accessibilityLabel() == "Terminate" })
         terminate.performClick(nil)
-        try await wait { await terminations.count == 1 }
-        try await wait { terminal._test_terminateHidden }
+        try await wait("terminate action invoked exactly once") { await terminations.count == 1 }
+        try await wait("terminate control hidden after killed status") { terminal._test_terminateHidden }
         let result = ToolEnvelope.success(tool: "shell_run", result: [
             "stdout": "seed output\nlive output\n", "stderr": "", "exit_code": 143, "killed_by": "user",
         ])
@@ -163,5 +180,53 @@ struct ResponsesRunningToolPresentationTests {
         #expect(completed._test_terminateHidden)
         #expect(completed._test_textStorageString.contains("live output"))
         #expect(completed._test_statusLabelString.contains("terminated"))
+    }
+
+    @Test func lateSubagentFeedSurvivesEmptySnapshotsRemovalCollapseAndReuse() async throws {
+        let row = NativeToolCallRowView(frame: .zero)
+        let id = "responses-late-feed-" + UUID().uuidString
+        let replacementId = "responses-reused-feed-" + UUID().uuidString
+        func configure(_ callId: String, expanded: Bool = true) {
+            row.configure(item: ToolCallItem(call: call(callId, name: "spawn_agent"), result: nil),
+                index: 0, totalCount: 1, isExpanded: expanded, width: 640,
+                theme: LightTheme(), onToggle: {}, onHeightChanged: {})
+        }
+        func panes() -> [NSHostingView<SubagentFeedView>] {
+            descendants(row, as: NSHostingView<SubagentFeedView>.self)
+        }
+        let registry = SubagentFeedRegistry.shared
+        defer { registry.removeNow(toolCallId: id); registry.removeNow(toolCallId: replacementId) }
+        configure(id)
+        try await deliverRegistrySnapshots()
+        #expect(panes().isEmpty)
+        let feed = SubagentFeed(toolCallId: id, kindId: "spawn", title: "Late helper",
+            suppressActivityMirror: true)
+        registry.register(feed)
+        try await wait("late helper pane mounted") { panes().count == 1 }
+        let first = try #require(panes().first)
+        registry.removeNow(toolCallId: id)
+        try await wait("removed helper pane unmounted") { panes().isEmpty }
+        registry.register(feed)
+        try await wait("helper pane remounted after missing feed") { panes().count == 1 }
+        #expect(panes().first !== first)
+
+        configure(id, expanded: false)
+        registry.removeNow(toolCallId: id)
+        registry.register(feed)
+        try await deliverRegistrySnapshots()
+        #expect(panes().isEmpty, "A collapsed row must not mount a registry update")
+        configure(id)
+        try await wait("helper pane restored on expansion") { panes().count == 1 }
+        let beforeReuse = try #require(panes().first)
+
+        configure(replacementId)
+        registry.register(feed)
+        try await deliverRegistrySnapshots()
+        #expect(panes().isEmpty, "A reused row must not display its previous call's feed")
+        let replacement = SubagentFeed(toolCallId: replacementId, kindId: "spawn", title: "Next helper",
+            suppressActivityMirror: true)
+        registry.register(replacement)
+        try await wait("replacement helper pane mounted") { panes().count == 1 }
+        #expect(panes().first !== beforeReuse)
     }
 }
