@@ -10965,7 +10965,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                     }
                     let response = try accumulator.result()
                     runUsage.append(promptTokens: response.inputTokenCount, completionTokens: response.completion.tokenCount,
-                        tokensPerSecond: response.completion.tokensPerSecond)
+                        tokensPerSecond: response.completion.tokensPerSecond,
+                        cachedPromptTokens: response.completion.cachedInputTokenCount)
                     switch response.completion.status {
                     case .cancelled:
                         throw NSError(domain: "OsaurusUpstreamCancellation", code: 499,
@@ -11426,6 +11427,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                         promptTokens: finalUsage.promptTokens,
                         completionTokens: finalUsage.completionTokens,
                         tokensPerSecond: finalUsage.tokensPerSecond,
+                        cachedPromptTokens: finalUsage.cachedPromptTokens,
                         model: model, responseId: responseId, created: created, context: ctx.value
                     )
                 }
@@ -17144,6 +17146,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 hop {
                     writerBound.value.setInputTokens(usage.prompt_tokens, context: ctx.value)
                     writerBound.value.setOutputTokens(usage.completion_tokens)
+                    writerBound.value.setCachedInputTokens(usage.cachedPromptTokens)
                     for call in calls { self.writeAnthropicToolUse(call, writer: writerBound.value, context: ctx.value) }
                     writerBound.value.writeFinish(stopReason: finish == .length ? "max_tokens" : (calls.isEmpty ? "end_turn" : "tool_use"), context: ctx.value)
                     writerBound.value.writeEnd(ctx.value)
@@ -17235,7 +17238,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 if blocks.isEmpty { blocks.append(.textBlock("")) }
                 let anthropicResp = AnthropicMessagesResponse(id: messageId, model: model, content: blocks,
                     stopReason: finish == .length ? "max_tokens" : (response.completion.functionCalls.isEmpty ? "end_turn" : "tool_use"),
-                    usage: AnthropicUsage(inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens))
+                    usage: AnthropicUsage(promptTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens,
+                        cachedPromptTokens: usage.cachedPromptTokens))
                 let json = try JSONEncoder.osaurusCanonical().encode(anthropicResp)
                 var headers: [(String, String)] = [("Content-Type", "application/json")]
                 headers.append(contentsOf: cors)

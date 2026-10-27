@@ -30,6 +30,11 @@ struct AnthropicMessagesRequest: Codable, Sendable {
     /// decode path and existing construction sites are unaffected; the
     /// synthesized Codable omits the key when nil.
     var cache_control: AnthropicCacheControl? = nil
+    /// Extended thinking (`{"type": "enabled", "budget_tokens": N}` / `{"type": "disabled"}` /
+    /// `{"type": "adaptive"}`). `enabled` / `disabled` switch the model's thinking rail the same way
+    /// `enable_thinking` does on chat completions; `adaptive` or no field keeps the model default.
+    /// The budget is accepted for wire compatibility; local models do not cap thinking by tokens.
+    var thinking: AnthropicThinkingConfig? = nil
 }
 
 /// `{"type": "ephemeral", "ttl": "1h"?}` cache-control marker. Only
@@ -37,6 +42,12 @@ struct AnthropicMessagesRequest: Codable, Sendable {
 /// 5-minute cache (write billed 1.25x input) and `"1h"` for the one-hour
 /// cache (write billed 2x input); both are refreshed on every hit and read
 /// at 0.1x. See `AnthropicCacheControl.forConversation(lastMessageRole:)`.
+/// Anthropic `thinking` request field.
+struct AnthropicThinkingConfig: Codable, Sendable, Equatable {
+    let type: String
+    var budget_tokens: Int? = nil
+}
+
 struct AnthropicCacheControl: Codable, Sendable, Equatable {
     let type: String
     var ttl: String? = nil
@@ -547,6 +558,24 @@ struct AnthropicUsage: Codable, Sendable {
         self.input_tokens = inputTokens
         self.output_tokens = outputTokens
     }
+
+    /// Usage from an OpenAI-style split, where `prompt_tokens` includes the
+    /// prefix-cache hit (`cached_tokens`, e.g. a local model's restored
+    /// prompt prefix). Anthropic reports cache reads separately: total input
+    /// is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`,
+    /// so the cached part moves out of `input_tokens` into
+    /// `cache_read_input_tokens` (omitted when nothing was cached).
+    init(promptTokens: Int, outputTokens: Int, cachedPromptTokens: Int?) {
+        let split = Self.split(promptTokens: promptTokens, cachedPromptTokens: cachedPromptTokens)
+        self.init(inputTokens: split.input, outputTokens: outputTokens)
+        self.cache_read_input_tokens = split.cacheRead
+    }
+
+    static func split(promptTokens: Int, cachedPromptTokens: Int?) -> (input: Int, cacheRead: Int?) {
+        let prompt = max(0, promptTokens)
+        let cached = min(max(0, cachedPromptTokens ?? 0), prompt)
+        return (prompt - cached, cached > 0 ? cached : nil)
+    }
 }
 
 /// Anthropic error response
@@ -862,12 +891,15 @@ struct MessageDeltaEvent: Codable, Sendable {
     struct MessageDeltaUsage: Codable, Sendable {
         let output_tokens: Int
         let input_tokens: Int?
+        var cache_read_input_tokens: Int? = nil
     }
 
-    init(stopReason: String?, outputTokens: Int, inputTokens: Int? = nil) {
+    init(stopReason: String?, outputTokens: Int, inputTokens: Int? = nil, cacheReadInputTokens: Int? = nil) {
         self.type = "message_delta"
         self.delta = MessageDelta(stop_reason: stopReason, stop_sequence: nil)
-        self.usage = MessageDeltaUsage(output_tokens: outputTokens, input_tokens: inputTokens)
+        self.usage = MessageDeltaUsage(
+            output_tokens: outputTokens, input_tokens: inputTokens,
+            cache_read_input_tokens: cacheReadInputTokens)
     }
 }
 
@@ -1084,7 +1116,7 @@ extension AnthropicMessagesRequest {
             }
         }
 
-        return ChatCompletionRequest(
+        var request = ChatCompletionRequest(
             model: model,
             messages: openAIMessages,
             temperature: temperature.map { Float($0) },
@@ -1099,6 +1131,13 @@ extension AnthropicMessagesRequest {
             tool_choice: openAIToolChoice,
             session_id: nil
         )
+        request.top_k = top_k
+        switch thinking?.type {
+        case "enabled": request.enable_thinking = true
+        case "disabled": request.enable_thinking = false
+        default: break
+        }
+        return request
     }
 }
 
