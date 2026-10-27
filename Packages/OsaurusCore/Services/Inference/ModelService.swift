@@ -22,11 +22,8 @@ struct GenerationParameters: Sendable {
     let topKOverride: Int?
     /// Optional per-request min_p override (falls back to model configuration when nil).
     let minPOverride: Float?
-    /// Optional repetition penalty (applies when supported by backend).
-    /// Mapped from OpenAI `frequency_penalty` only — `presence_penalty`
-    /// has no MLX analog. The raw OpenAI values below are kept on the
-    /// struct so remote services that natively support both can forward
-    /// them straight through.
+    /// Explicit multiplicative repetition penalty, independent of the additive
+    /// frequency/presence controls below. Nil preserves the bundle default.
     let repetitionPenalty: Float?
     /// True when sampling fields were filled from app/UI defaults rather than
     /// an explicit client request. Local MLX must treat these as defaults to
@@ -53,6 +50,8 @@ struct GenerationParameters: Sendable {
     let jsonSchema: String?
     /// Model-specific options resolved from the active `ModelProfile` (e.g. aspect ratio).
     let modelOptions: [String: ModelOptionValue]
+    /// JSON variables for the active chat template, scoped to this generation.
+    let templateKwargs: [String: JSONValue]?
     /// Session identifier for chat/history grouping. Not threaded into the
     /// MLX cache layer — vmlx's `CacheCoordinator` handles prefix reuse
     /// autonomously via content addressing.
@@ -163,6 +162,7 @@ struct GenerationParameters: Sendable {
         jsonMode: Bool = false,
         jsonSchema: String? = nil,
         modelOptions: [String: ModelOptionValue] = [:],
+        templateKwargs: [String: JSONValue]? = nil,
         sessionId: String? = nil,
         activityID: UUID = UUID(),
         activitySource: RequestSource? = nil,
@@ -199,6 +199,7 @@ struct GenerationParameters: Sendable {
         self.jsonMode = jsonMode
         self.jsonSchema = jsonSchema
         self.modelOptions = modelOptions
+        self.templateKwargs = templateKwargs
         self.sessionId = sessionId
         self.activityID = activityID
         self.activitySource = activitySource ?? requestSource

@@ -1291,7 +1291,12 @@ struct MLXBatchAdapter {
         toolChoice: ToolChoiceOption? = nil,
         toolChoiceName: String? = nil
     ) -> [String: any Sendable] {
-        var context: [String: any Sendable] = [:]
+        // Start with the complete request dictionary. Explicit typed reasoning
+        // and tool controls below win; omission leaves bundle defaults intact.
+        var context = generation.templateKwargs?.mapValues(\.templateContextValue) ?? [:]
+        if generation.templateKwargs?.isEmpty == false {
+            context[ChatTemplateParameters.explicitContextKey] = true
+        }
         if toolChoiceRequiresLocalCall(toolChoice) {
             context["tool_choice"] = "required"
         }

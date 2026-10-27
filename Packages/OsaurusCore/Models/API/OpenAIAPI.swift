@@ -706,17 +706,19 @@ struct CompletionRequest: Decodable, Sendable {
 struct ChatCompletionRequest: Codable, Sendable {
     let model: String
     var messages: [ChatMessage]
-    let temperature: Float?
+    var temperature: Float?
     let max_tokens: Int?
     /// OpenAI newer alias for max_tokens; accepted on inbound requests alongside max_tokens.
     var max_completion_tokens: Int? = nil
     let stream: Bool?
-    let top_p: Float?
+    var top_p: Float?
     var top_k: Int? = nil
     /// Extension sampling knob (mlx/llama.cpp ecosystems): minimum
     /// probability cutoff relative to the top token. Mapped to
     /// `GenerationParameters.minPOverride`.
     var min_p: Float? = nil
+    /// Explicit multiplicative repetition penalty; absent preserves the model default.
+    var repetition_penalty: Float? = nil
     let frequency_penalty: Float?
     let presence_penalty: Float?
     let stop: [String]?
@@ -796,6 +798,8 @@ struct ChatCompletionRequest: Codable, Sendable {
     /// `reasoning_effort` chat-template kwarg; remote providers forward it
     /// natively where supported.
     var reasoning_effort: String? = nil
+    /// Request-local variables rendered by the active bundle's chat template.
+    var chat_template_kwargs: [String: JSONValue]? = nil
     /// Local-only marker for app/UI requests whose sampling values came from
     /// profile defaults. Not decoded from OpenAI JSON and not forwarded to
     /// remote providers.
@@ -920,12 +924,12 @@ struct ChatCompletionRequest: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, max_tokens, max_completion_tokens, stream, top_p, top_k
-        case min_p
+        case min_p, repetition_penalty
         case frequency_penalty, presence_penalty, stop, n
         case tools, tool_choice, session_id
         case seed, response_format, stream_options
         case logprobs, top_logprobs
-        case enable_thinking, reasoning_effort
+        case enable_thinking, reasoning_effort, chat_template_kwargs
     }
 
     /// Osaurus Connect fields, decoded only: they belong to this Mac and are
@@ -935,7 +939,7 @@ struct ChatCompletionRequest: Codable, Sendable {
     }
 
     /// vLLM / SGLang / vmlx-py carry template switches in `chat_template_kwargs`.
-    /// Decoded only (never forwarded); see `init(from:)` for which keys apply.
+    /// Legacy alias handling remains separate from preserving the complete dictionary.
     private enum TemplateKwargsCodingKeys: String, CodingKey {
         case chat_template_kwargs
     }
@@ -964,8 +968,10 @@ struct ChatCompletionRequest: Codable, Sendable {
         // Preserve admission, residency, routing and attribution as one value.
         copy.inferenceContext = inferenceContext
         copy.min_p = min_p
+        copy.repetition_penalty = repetition_penalty
         copy.enable_thinking = enable_thinking
         copy.reasoning_effort = reasoning_effort
+        copy.chat_template_kwargs = chat_template_kwargs
         copy.logprobs = logprobs
         copy.top_logprobs = top_logprobs
         return copy
@@ -999,8 +1005,10 @@ struct ChatCompletionRequest: Codable, Sendable {
         // Preserve admission, residency, routing and attribution as one value.
         copy.inferenceContext = inferenceContext
         copy.min_p = min_p
+        copy.repetition_penalty = repetition_penalty
         copy.enable_thinking = enable_thinking
         copy.reasoning_effort = reasoning_effort
+        copy.chat_template_kwargs = chat_template_kwargs
         copy.logprobs = logprobs
         copy.top_logprobs = top_logprobs
         return copy
@@ -1027,6 +1035,11 @@ extension ChatCompletionRequest {
         top_p = try container.decodeIfPresent(Float.self, forKey: .top_p)
         top_k = try container.decodeIfPresent(Int.self, forKey: .top_k)
         min_p = try container.decodeIfPresent(Float.self, forKey: .min_p)
+        repetition_penalty = try container.decodeIfPresent(Float.self, forKey: .repetition_penalty)
+        if let reason = RequestValidator.repetitionPenaltyReason(repetition_penalty) {
+            throw DecodingError.dataCorruptedError(forKey: .repetition_penalty, in: container,
+                debugDescription: reason)
+        }
         frequency_penalty = try container.decodeIfPresent(Float.self, forKey: .frequency_penalty)
         presence_penalty = try container.decodeIfPresent(Float.self, forKey: .presence_penalty)
         if let singleStop = try? container.decode(String.self, forKey: .stop) {
@@ -1045,6 +1058,8 @@ extension ChatCompletionRequest {
         top_logprobs = try container.decodeIfPresent(Int.self, forKey: .top_logprobs)
         enable_thinking = try container.decodeIfPresent(Bool.self, forKey: .enable_thinking)
         reasoning_effort = try container.decodeIfPresent(String.self, forKey: .reasoning_effort)
+        chat_template_kwargs = try? container.decodeIfPresent([String: JSONValue].self, forKey: .chat_template_kwargs)
+        try ChatTemplateParameters.validate(chat_template_kwargs)
         // DeepSeek-V4.1: clients written for vmlx-py / vLLM switch thinking with
         // `chat_template_kwargs.enable_thinking` (or DeepSeek's `thinking`) and
         // the effort with `chat_template_kwargs.reasoning_effort`. Without this the
@@ -1794,4 +1809,10 @@ extension Tool {
         }
         return JSONCanonicalization.normalizeObject(value)
     }
+}
+
+// Typed access preserves unknown template variables without coercing strings.
+extension JSONValue {
+    var boolValue: Bool? { if case .bool(let value) = self { return value }; return nil }
+    var stringValue: String? { if case .string(let value) = self { return value }; return nil }
 }

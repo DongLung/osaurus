@@ -3455,7 +3455,7 @@ struct RuntimePolicySourceTests {
                 && evaluator.contains("ChatExecutionContext.$currentSessionSource.withValue(")
                 && dispatch.contains("request.inferenceSourceOverride = ChatExecutionContext.inferenceSourceOverride")
                 && background.contains("ChatExecutionContext.$inferenceSourceOverride.withValue(request.inferenceSourceOverride)")
-                && background.contains("await context.start(prompt: request.prompt, taskIntent: request.taskIntent)")
+                && background.contains("await context.start(prompt: request.prompt, taskIntent: request.taskIntent, generationOverrides: request.generationOverrides)")
                 && execution.contains("source == .chatUI && inferenceSourceOverride == .evaluation ? .evaluation : source")
                 && engine.contains("ChatExecutionContext.resolvedInferenceSource(baseInferenceSource)"),
             "The whole evaluation conversation and detached delegated start must carry scoped headless ownership without rewriting persisted Chat/Agent provenance, borrowing HTTP protection or leaving a reused engine sticky."
@@ -3525,9 +3525,10 @@ struct RuntimePolicySourceTests {
             "Tool-budget wrap-up calls use the same implicit-sampling contract as normal UI turns."
         )
         #expect(
-            chatView.contains(
-                "let turnGenerationControls = await ChatTurnGenerationControls.captureForSend("
-            ),
+            chatView.contains("var turnGenerationControls = generationControls")
+                && chatView.contains("if !generationControls.hasResolvedReasoning {")
+                && chatView.contains("turnGenerationControls = await ChatTurnGenerationControls.captureForSend(")
+                && chatView.contains("turnGenerationControls.hasResolvedReasoning = true"),
             "Chat UI must freeze prompt-affecting model controls once at send time, after bounded cold-cache recovery, instead of rereading mutable UI state between tool iterations."
         )
         #expect(
