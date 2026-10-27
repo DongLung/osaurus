@@ -1930,6 +1930,10 @@ enum ConfigPlanner {
             issues.append(
                 "\(label).claude_code.mode: must be one of: \(ConfigHarness.modeKeys.joined(separator: ", ")).")
         }
+        if let raw = claudeCode?.effort, ConfigHarness.effort(forKey: raw) == nil {
+            issues.append(
+                "\(label).claude_code.effort: must be one of: \(ConfigHarness.effortKeys.joined(separator: ", ")).")
+        }
     }
 
     @MainActor
