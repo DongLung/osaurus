@@ -690,6 +690,20 @@ public actor ModelRuntime {
     /// chat window closes. `nil` (never generated — e.g. a warm preload) is
     /// treated as chat-sourced, since preloads are chat-driven.
     private var lastUseSource: [String: RequestSource] = [:]
+    /// When each model last served a turn of the owner's phone call
+    /// (`ChatExecutionContext.isVoiceCall`), or was warmed for one: kept
+    /// loaded a while longer, as the phone speaks each reply before the next
+    /// turn comes (see `voiceCallIdleResidency`). By time rather than by the
+    /// latest generation, so a title, memory or Mac chat generation on the
+    /// same model mid-call doesn't drop it back to the short wait.
+    private var voiceCallTurnAt: [String: Date] = [:]
+
+    /// Whether `modelName` served a call turn recently enough to still be on
+    /// that call: within one call residency of the turn.
+    private func isOnVoiceCall(_ modelName: String) -> Bool {
+        guard let last = voiceCallTurnAt[modelName] else { return false }
+        return Date().timeIntervalSince(last) < TimeInterval(Self.voiceCallResidencySeconds)
+    }
 
     /// Grace period applied when the last chat window referencing a model
     /// closes. Zero: closing the chat evicts the model immediately — the
@@ -1315,6 +1329,28 @@ public actor ModelRuntime {
         if await ModelLease.shared.count(for: found.name) == 0 {
             await scheduleIdleResidency(for: found.name)
         }
+    }
+
+    /// Whether a generation on `name` would load an installed local model
+    /// first: a phone run says so on its stream while it waits.
+    func needsLoad(_ name: String) -> Bool {
+        // Resident under any name the generation would find it by (the
+        // requested one, the canonical one, or a case or repo-tail match).
+        if residentKey(matching: name) != nil { return false }
+        return ModelManager.findInstalledModel(named: name) != nil
+    }
+
+    /// Loads a local model as the owner's phone call connects (`POST
+    /// /agents/{id}/warm`, MOBILE_PROTOCOL §6.5), so the first turn doesn't
+    /// wait on it, and keeps it as a call's turn does. Whether it was loaded
+    /// already; nil for a name that is no installed local model (a cloud one).
+    func warmForVoiceCall(name: String) async throws -> Bool? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let found = ModelManager.findInstalledModel(named: trimmed) else { return nil }
+        let already = modelCache[found.name] != nil
+        voiceCallTurnAt[found.name] = Date()
+        try await preload(name: found.name)
+        return already
     }
 
     /// Best-effort MLX freed-buffer pool trim under OS memory pressure.
@@ -2869,6 +2905,26 @@ public actor ModelRuntime {
         return configured
     }
 
+    /// How long a model stays loaded after a phone call's turn: on a call the
+    /// phone speaks the reply for 15–20 s after the text is done, then the
+    /// user answers, so the default 30 s unloaded it before most next turns
+    /// and each paid a reload. 3.5 minutes from the turn's end, unless the
+    /// configured wait is longer. A user who chose to unload at once, or to
+    /// keep models loaded, keeps that choice.
+    static let voiceCallResidencySeconds = 210
+
+    nonisolated static func voiceCallIdleResidency(
+        _ policy: ModelIdleResidencyPolicy,
+        configured: ModelIdleResidencyPolicy
+    ) -> ModelIdleResidencyPolicy {
+        guard case .afterSeconds(let configuredSeconds) = configured else { return policy }
+        switch policy {
+        case .never: return .never
+        case .afterSeconds(let seconds): return .afterSeconds(max(seconds, voiceCallResidencySeconds))
+        case .immediately: return .afterSeconds(max(configuredSeconds, voiceCallResidencySeconds))
+        }
+    }
+
     private func scheduleIdleResidency(for modelName: String) async {
         let policyRevision = idleResidencyPolicyRevision
         guard !isClearingAllResidency,
@@ -2893,12 +2949,15 @@ public actor ModelRuntime {
         let hasHandoffOwner =
             residentMetadata[modelName]?.childOwnershipToken != nil
             || parentRetentions.holds(residentMetadata[modelName]?.identity)
-        let policy = Self.resolvedIdleResidencyPolicy(
+        let resolved = Self.resolvedIdleResidencyPolicy(
             configured: configured,
             source: lastUseSource[modelName],
             referencedByChat: referencedByChat,
             hasHandoffOwner: hasHandoffOwner
         )
+        let policy =
+            isOnVoiceCall(modelName)
+            ? Self.voiceCallIdleResidency(resolved, configured: configured) : resolved
         genLog.info(
             "idleResidency: model=\(modelName, privacy: .public) policy=\(String(describing: policy), privacy: .public) handoffOwned=\(hasHandoffOwner, privacy: .public) chatReferenced=\(referencedByChat, privacy: .public)"
         )
@@ -6032,6 +6091,9 @@ public actor ModelRuntime {
             incoming: parameters.requestSource,
             preserveExisting: parameters.preserveExistingResidencyOwner
         )
+        if ChatExecutionContext.isVoiceCall {
+            voiceCallTurnAt[modelName] = Date()
+        }
 
         // Scoped start/finish around ONLY a cold container load. Hot
         // resident turns still call `loadContainer` to get the holder, but
